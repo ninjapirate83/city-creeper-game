@@ -5,8 +5,226 @@ const statusEl = document.getElementById("status");
 const breakBtn = document.getElementById("breakBtn");
 const jumpBtn = document.getElementById("jumpBtn");
 
-const worldMeshes = new Set();
+/** ---------------------------
+ *  Voxel + Chunk System
+ *  --------------------------- */
+const CHUNK_SIZE = 16;
+const CHUNK_VOL = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
 
+const BLOCK = {
+  AIR: 0,
+  ROAD: 1,
+  BUILDING: 2,
+  CRATE: 3,
+};
+
+function idx(lx, ly, lz) {
+  return lx + CHUNK_SIZE * (ly + CHUNK_SIZE * lz);
+}
+function floorDiv(n, d) {
+  return Math.floor(n / d);
+}
+function mod(n, d) {
+  return ((n % d) + d) % d;
+}
+function chunkKey(cx, cy, cz) {
+  return `${cx},${cy},${cz}`;
+}
+
+class Chunk {
+  constructor(scene, cx, cy, cz) {
+    this.scene = scene;
+    this.cx = cx;
+    this.cy = cy;
+    this.cz = cz;
+    this.blocks = new Uint8Array(CHUNK_VOL); // all AIR
+    this.mesh = null;
+    this.dirty = true;
+  }
+  get(lx, ly, lz) {
+    if (lx < 0 || ly < 0 || lz < 0 || lx >= CHUNK_SIZE || ly >= CHUNK_SIZE || lz >= CHUNK_SIZE) return BLOCK.AIR;
+    return this.blocks[idx(lx, ly, lz)];
+  }
+  set(lx, ly, lz, v) {
+    if (lx < 0 || ly < 0 || lz < 0 || lx >= CHUNK_SIZE || ly >= CHUNK_SIZE || lz >= CHUNK_SIZE) return;
+    this.blocks[idx(lx, ly, lz)] = v;
+    this.dirty = true;
+  }
+  origin() {
+    return new BABYLON.Vector3(this.cx * CHUNK_SIZE, this.cy * CHUNK_SIZE, this.cz * CHUNK_SIZE);
+  }
+}
+
+class VoxelWorld {
+  constructor(scene) {
+    this.scene = scene;
+    this.chunks = new Map();
+    this.dirtyQueue = new Set(); // chunk keys
+
+    // Simple materials (per chunk mesh is one material; we tint by vertex color)
+    this.mat = new BABYLON.StandardMaterial("chunkMat", scene);
+    this.mat.specularColor = new BABYLON.Color3(0.1, 0.1, 0.1);
+    this.mat.backFaceCulling = true;
+  }
+
+  getChunk(cx, cy, cz, create = false) {
+    const key = chunkKey(cx, cy, cz);
+    let c = this.chunks.get(key);
+    if (!c && create) {
+      c = new Chunk(this.scene, cx, cy, cz);
+      this.chunks.set(key, c);
+      this.dirtyQueue.add(key);
+    }
+    return c;
+  }
+
+  getBlock(wx, wy, wz) {
+    const cx = floorDiv(wx, CHUNK_SIZE);
+    const cy = floorDiv(wy, CHUNK_SIZE);
+    const cz = floorDiv(wz, CHUNK_SIZE);
+    const c = this.getChunk(cx, cy, cz, false);
+    if (!c) return BLOCK.AIR;
+    const lx = mod(wx, CHUNK_SIZE);
+    const ly = mod(wy, CHUNK_SIZE);
+    const lz = mod(wz, CHUNK_SIZE);
+    return c.get(lx, ly, lz);
+  }
+
+  setBlock(wx, wy, wz, v) {
+    const cx = floorDiv(wx, CHUNK_SIZE);
+    const cy = floorDiv(wy, CHUNK_SIZE);
+    const cz = floorDiv(wz, CHUNK_SIZE);
+    const c = this.getChunk(cx, cy, cz, true);
+    const lx = mod(wx, CHUNK_SIZE);
+    const ly = mod(wy, CHUNK_SIZE);
+    const lz = mod(wz, CHUNK_SIZE);
+
+    c.set(lx, ly, lz, v);
+    this.markDirty(cx, cy, cz);
+
+    // If on boundary, neighbors become dirty too
+    if (lx === 0) this.markDirty(cx - 1, cy, cz);
+    if (lx === CHUNK_SIZE - 1) this.markDirty(cx + 1, cy, cz);
+    if (ly === 0) this.markDirty(cx, cy - 1, cz);
+    if (ly === CHUNK_SIZE - 1) this.markDirty(cx, cy + 1, cz);
+    if (lz === 0) this.markDirty(cx, cy, cz - 1);
+    if (lz === CHUNK_SIZE - 1) this.markDirty(cx, cy, cz + 1);
+  }
+
+  markDirty(cx, cy, cz) {
+    const key = chunkKey(cx, cy, cz);
+    if (this.chunks.has(key)) this.dirtyQueue.add(key);
+  }
+
+  // Build a limited number per frame to keep iPad smooth
+  rebuildSome(maxPerFrame = 2) {
+    let built = 0;
+    for (const key of this.dirtyQueue) {
+      const c = this.chunks.get(key);
+      if (c) {
+        this.buildChunkMesh(c);
+        c.dirty = false;
+      }
+      this.dirtyQueue.delete(key);
+      built++;
+      if (built >= maxPerFrame) break;
+    }
+  }
+
+  buildChunkMesh(chunk) {
+    if (chunk.mesh) {
+      chunk.mesh.dispose();
+      chunk.mesh = null;
+    }
+
+    const positions = [];
+    const normals = [];
+    const indices = [];
+    const uvs = [];
+    const colors = []; // RGBA per vertex
+
+    const origin = chunk.origin();
+
+    // Face definitions: normal + 4 corners
+    const faces = [
+      { n: [1, 0, 0],  v: [[1,0,0],[1,1,0],[1,1,1],[1,0,1]] }, // +X
+      { n: [-1,0,0],  v: [[0,0,1],[0,1,1],[0,1,0],[0,0,0]] }, // -X
+      { n: [0, 1, 0], v: [[0,1,1],[1,1,1],[1,1,0],[0,1,0]] }, // +Y
+      { n: [0,-1,0],  v: [[0,0,0],[1,0,0],[1,0,1],[0,0,1]] }, // -Y
+      { n: [0, 0, 1], v: [[1,0,1],[1,1,1],[0,1,1],[0,0,1]] }, // +Z
+      { n: [0, 0,-1], v: [[0,0,0],[0,1,0],[1,1,0],[1,0,0]] }, // -Z
+    ];
+
+    function blockColor(bt) {
+      // Return [r,g,b,a]
+      if (bt === BLOCK.ROAD) return [0.10, 0.10, 0.12, 1];
+      if (bt === BLOCK.BUILDING) return [0.35, 0.38, 0.42, 1];
+      if (bt === BLOCK.CRATE) return [0.45, 0.30, 0.18, 1];
+      return [1, 1, 1, 1];
+    }
+
+    let vertCount = 0;
+
+    for (let lz = 0; lz < CHUNK_SIZE; lz++) {
+      for (let ly = 0; ly < CHUNK_SIZE; ly++) {
+        for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+          const bt = chunk.get(lx, ly, lz);
+          if (bt === BLOCK.AIR) continue;
+
+          const wx = origin.x + lx;
+          const wy = origin.y + ly;
+          const wz = origin.z + lz;
+
+          const col = blockColor(bt);
+
+          for (let f = 0; f < faces.length; f++) {
+            const face = faces[f];
+            const nx = face.n[0], ny = face.n[1], nz = face.n[2];
+
+            // Only emit if neighbor is AIR
+            const nb = this.getBlock(wx + nx, wy + ny, wz + nz);
+            if (nb !== BLOCK.AIR) continue;
+
+            for (let i = 0; i < 4; i++) {
+              const cv = face.v[i];
+              positions.push(wx + cv[0], wy + cv[1], wz + cv[2]);
+              normals.push(nx, ny, nz);
+              // simple UVs (not used much yet)
+              uvs.push(i === 0 || i === 3 ? 0 : 1, i < 2 ? 0 : 1);
+              colors.push(col[0], col[1], col[2], col[3]);
+            }
+
+            indices.push(
+              vertCount + 0, vertCount + 1, vertCount + 2,
+              vertCount + 0, vertCount + 2, vertCount + 3
+            );
+            vertCount += 4;
+          }
+        }
+      }
+    }
+
+    if (indices.length === 0) return;
+
+    const mesh = new BABYLON.Mesh(`chunk_${chunk.cx}_${chunk.cy}_${chunk.cz}`, this.scene);
+    mesh.material = this.mat;
+    mesh.checkCollisions = true;
+
+    const vd = new BABYLON.VertexData();
+    vd.positions = positions;
+    vd.normals = normals;
+    vd.indices = indices;
+    vd.uvs = uvs;
+    vd.colors = colors;
+    vd.applyToMesh(mesh, true);
+
+    chunk.mesh = mesh;
+  }
+}
+
+/** ---------------------------
+ *  Scene
+ *  --------------------------- */
 function makeScene() {
   const scene = new BABYLON.Scene(engine);
   scene.clearColor = new BABYLON.Color4(0.05, 0.06, 0.08, 1);
@@ -19,17 +237,15 @@ function makeScene() {
   dir.position = new BABYLON.Vector3(40, 80, -40);
   dir.intensity = 0.6;
 
-  // Ground (street plane)
-  const ground = BABYLON.MeshBuilder.CreateGround("ground", { width: 220, height: 220 }, scene);
-  const gmat = new BABYLON.StandardMaterial("gmat", scene);
-  gmat.diffuseColor = new BABYLON.Color3(0.12, 0.12, 0.14);
-  ground.material = gmat;
+  // Invisible ground collider (so you can’t fall forever)
+  const ground = BABYLON.MeshBuilder.CreateGround("ground", { width: 260, height: 260 }, scene);
+  ground.isVisible = false;
   ground.checkCollisions = true;
 
   // Player (invisible collider capsule)
   const player = BABYLON.MeshBuilder.CreateCapsule("player", { height: 2.0, radius: 0.45 }, scene);
   player.isVisible = false;
-  player.position = new BABYLON.Vector3(0, 2, 0);
+  player.position = new BABYLON.Vector3(0, 3, 0);
   player.checkCollisions = true;
 
   // Camera (third-person follow)
@@ -41,63 +257,60 @@ function makeScene() {
   camera.maxCameraSpeed = 10;
   camera.attachControl(canvas, true);
 
-  // Simple gravity + collisions
+  // Gravity + collisions
   scene.collisionsEnabled = true;
   scene.gravity = new BABYLON.Vector3(0, -0.45, 0);
   player.ellipsoid = new BABYLON.Vector3(0.45, 0.9, 0.45);
   player.ellipsoidOffset = new BABYLON.Vector3(0, 0.9, 0);
 
-  // City generator: blocks as buildings + street grid
-  const buildingMat = new BABYLON.StandardMaterial("bmat", scene);
-  buildingMat.diffuseColor = new BABYLON.Color3(0.35, 0.38, 0.42);
+  // Voxel world
+  const vox = new VoxelWorld(scene);
 
-  const accentMat = new BABYLON.StandardMaterial("amat", scene);
-  accentMat.diffuseColor = new BABYLON.Color3(0.25, 0.30, 0.34);
-
-  function addBox(name, x, y, z, w, h, d, mat) {
-    const b = BABYLON.MeshBuilder.CreateBox(name, { width: w, height: h, depth: d }, scene);
-    b.position = new BABYLON.Vector3(x, y + h / 2, z);
-    b.material = mat;
-    b.checkCollisions = true;
-    b.metadata = { breakable: true };
-    worldMeshes.add(b);
-    return b;
+  function fillBox(x0, y0, z0, x1, y1, z1, type) {
+    for (let z = z0; z < z1; z++) {
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          vox.setBlock(x, y, z, type);
+        }
+      }
+    }
   }
 
-  // Make simple “city blocks”
+  // Build city voxels (roads + buildings)
+  for (let z = -120; z < 120; z++) {
+    for (let x = -120; x < 120; x++) {
+      vox.setBlock(x, 0, z, BLOCK.ROAD);
+    }
+  }
+
   const spacing = 18;
   const half = 4;
   for (let ix = -half; ix <= half; ix++) {
     for (let iz = -half; iz <= half; iz++) {
-      // leave some “streets”
       if (ix === 0 || iz === 0) continue;
+
       const baseX = ix * spacing;
       const baseZ = iz * spacing;
 
-      const bw = 8 + Math.random() * 6;
-      const bd = 8 + Math.random() * 6;
-      const bh = 6 + Math.random() * 18;
+      const bw = Math.floor(8 + Math.random() * 6);
+      const bd = Math.floor(8 + Math.random() * 6);
+      const bh = Math.floor(6 + Math.random() * 18);
 
-      addBox(`b_${ix}_${iz}`, baseX, 0, baseZ, bw, bh, bd, Math.random() > 0.4 ? buildingMat : accentMat);
+      fillBox(baseX, 1, baseZ, baseX + bw, 1 + bh, baseZ + bd, BLOCK.BUILDING);
     }
   }
 
-  // “Props” to break (crates)
-  const crateMat = new BABYLON.StandardMaterial("crate", scene);
-  crateMat.diffuseColor = new BABYLON.Color3(0.45, 0.30, 0.18);
-
+  // Crates as voxels
   for (let i = 0; i < 50; i++) {
-    const x = (Math.random() - 0.5) * 180;
-    const z = (Math.random() - 0.5) * 180;
-    const c = BABYLON.MeshBuilder.CreateBox(`crate_${i}`, { size: 2 }, scene);
-    c.position = new BABYLON.Vector3(x, 1, z);
-    c.material = crateMat;
-    c.checkCollisions = true;
-    c.metadata = { breakable: true };
-    worldMeshes.add(c);
+    const x = Math.floor((Math.random() - 0.5) * 180);
+    const z = Math.floor((Math.random() - 0.5) * 180);
+    vox.setBlock(x, 1, z, BLOCK.CRATE);
   }
 
-  // Creeper-like enemy (only monster)
+  // Initial build (do more the first time)
+  for (let i = 0; i < 200; i++) vox.rebuildSome(8);
+
+  // Creeper-like enemy (only monster) - still a normal mesh for now
   const creeper = BABYLON.MeshBuilder.CreateBox("creeper", { size: 1.6 }, scene);
   creeper.position = new BABYLON.Vector3(20, 1.0, 20);
   creeper.checkCollisions = true;
@@ -159,18 +372,14 @@ function makeScene() {
     if (!touching) return;
     setStick(e.clientX - padCenter.x, e.clientY - padCenter.y);
   });
-  pad.addEventListener("pointerup", () => {
+  function endPad() {
     touching = false;
     stick.style.left = `35px`;
     stick.style.top  = `35px`;
     moveX = 0; moveZ = 0;
-  });
-  pad.addEventListener("pointercancel", () => {
-    touching = false;
-    stick.style.left = `35px`;
-    stick.style.top  = `35px`;
-    moveX = 0; moveZ = 0;
-  });
+  }
+  pad.addEventListener("pointerup", endPad);
+  pad.addEventListener("pointercancel", endPad);
 
   // Jump
   let yVelocity = 0;
@@ -181,35 +390,55 @@ function makeScene() {
   }
   jumpBtn.addEventListener("click", tryJump);
 
-  // Break (raycast from camera to remove breakable mesh)
+  // Break voxel (raycast, then convert to voxel coords)
   function tryBreak() {
-    const ray = scene.createPickingRay(
-      scene.getEngine().getRenderWidth() / 2,
-      scene.getEngine().getRenderHeight() / 2,
-      BABYLON.Matrix.Identity(),
-      camera
-    );
-    const hit = scene.pickWithRay(ray, (m) => m && m.metadata && m.metadata.breakable);
-    if (hit && hit.pickedMesh) {
-      const m = hit.pickedMesh;
-      worldMeshes.delete(m);
-      m.dispose();
+    const pick = scene.pick(engine.getRenderWidth() / 2, engine.getRenderHeight() / 2);
+    if (!pick || !pick.hit || !pick.pickedPoint) return;
+
+    // Only allow breaking chunk meshes (starts with "chunk_")
+    if (!pick.pickedMesh || typeof pick.pickedMesh.name !== "string" || !pick.pickedMesh.name.startsWith("chunk_")) return;
+
+    const n = pick.getNormal(true);
+    if (!n) return;
+
+    const p = pick.pickedPoint;
+    const eps = 0.01;
+    const wx = Math.floor(p.x - n.x * eps);
+    const wy = Math.floor(p.y - n.y * eps);
+    const wz = Math.floor(p.z - n.z * eps);
+
+    const bt = vox.getBlock(wx, wy, wz);
+    if (bt !== BLOCK.AIR) {
+      vox.setBlock(wx, wy, wz, BLOCK.AIR);
     }
   }
   breakBtn.addEventListener("click", tryBreak);
 
-  // Explosion effect: remove nearby breakables, shake camera
+  // Explosion: delete voxels around point, shake camera
   function explodeAt(pos) {
     const radius = 10;
-    for (const m of Array.from(worldMeshes)) {
-      if (!m || m.isDisposed()) continue;
-      const d = BABYLON.Vector3.Distance(m.position, pos);
-      if (d < radius) {
-        worldMeshes.delete(m);
-        m.dispose();
+    const r2 = radius * radius;
+
+    const minX = Math.floor(pos.x - radius);
+    const maxX = Math.floor(pos.x + radius);
+    const minY = Math.floor(pos.y - radius);
+    const maxY = Math.floor(pos.y + radius);
+    const minZ = Math.floor(pos.z - radius);
+    const maxZ = Math.floor(pos.z + radius);
+
+    for (let z = minZ; z <= maxZ; z++) {
+      for (let y = minY; y <= maxY; y++) {
+        for (let x = minX; x <= maxX; x++) {
+          const dx = (x + 0.5) - pos.x;
+          const dy = (y + 0.5) - pos.y;
+          const dz = (z + 0.5) - pos.z;
+          if (dx*dx + dy*dy + dz*dz <= r2) {
+            if (vox.getBlock(x, y, z) !== BLOCK.AIR) vox.setBlock(x, y, z, BLOCK.AIR);
+          }
+        }
       }
     }
-    // quick camera shake
+
     const original = camera.radius;
     camera.radius = original + 2;
     setTimeout(() => (camera.radius = original), 150);
@@ -218,6 +447,9 @@ function makeScene() {
   // Main loop
   scene.onBeforeRenderObservable.add(() => {
     const dt = engine.getDeltaTime() / 1000;
+
+    // Rebuild a couple chunk meshes per frame (smooth on iPad)
+    vox.rebuildSome(2);
 
     // Player movement relative to camera forward/right on XZ plane
     const forward = camera.getForwardRay().direction;
@@ -232,10 +464,8 @@ function makeScene() {
     yVelocity += scene.gravity.y * dt;
     const vertical = new BABYLON.Vector3(0, yVelocity, 0);
 
-    // move with collisions
     player.moveWithCollisions(move.add(vertical));
 
-    // crude ground check
     onGround = Math.abs(yVelocity) < 0.02 && player.position.y <= 2.01;
     if (onGround) {
       yVelocity = 0;
@@ -244,8 +474,6 @@ function makeScene() {
 
     // Creeper behavior
     const distToPlayer = BABYLON.Vector3.Distance(creeper.position, player.position);
-
-    // Cooldowns
     explodeCooldown = Math.max(0, explodeCooldown - dt);
 
     let target;
@@ -268,18 +496,16 @@ function makeScene() {
       creeper.moveWithCollisions(step);
     }
 
-    // “Explosion” when close (player cannot die)
+    // Explosion when close (player cannot die)
     if (distToPlayer < 3.0 && explodeCooldown <= 0) {
       explodeCooldown = 3.0;
       explodeAt(creeper.position.clone());
-      // knock creeper back a bit so it doesn't chain-explode
       creeper.position.addInPlace(new BABYLON.Vector3(6, 0, 6));
     }
 
-    statusEl.textContent = `Blocks: ${worldMeshes.size} | Creeper dist: ${distToPlayer.toFixed(1)}`;
+    statusEl.textContent = `Chunks: ${vox.chunks.size} | Creeper dist: ${distToPlayer.toFixed(1)}`;
   });
 
-  // Helpful: prevent page scroll while playing
   document.body.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
 
   statusEl.textContent = "Running";
@@ -287,6 +513,5 @@ function makeScene() {
 }
 
 const scene = makeScene();
-
 engine.runRenderLoop(() => scene.render());
 window.addEventListener("resize", () => engine.resize());

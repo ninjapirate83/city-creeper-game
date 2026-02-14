@@ -1,535 +1,1064 @@
-const canvas = document.getElementById("renderCanvas");
-const engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+/* main.js — iPad-friendly Babylon.js “Block City” (chunked voxel mesh, dual joysticks, break/jump, creeper explosion)
+   Assumes Babylon.js is loaded in index.html and there is a <canvas id="renderCanvas"></canvas>.
+   If UI elements (buttons/joysticks/status) are missing, this file creates them.
+*/
 
-const statusEl = document.getElementById("status");
-const breakBtn = document.getElementById("breakBtn");
-const jumpBtn = document.getElementById("jumpBtn");
+(() => {
+  "use strict";
 
-// Prevent iOS double-tap zoom (especially on buttons)
-let lastTouchEnd = 0;
-document.addEventListener(
-  "touchend",
-  (e) => {
-    const now = Date.now();
-    if (now - lastTouchEnd <= 300) e.preventDefault();
-    lastTouchEnd = now;
-  },
-  { passive: false }
-);
+  /** ---------------------------
+   *  DOM + iOS Safari hardening
+   *  --------------------------- */
+  const canvas = document.getElementById("renderCanvas");
+  if (!canvas) throw new Error('Missing <canvas id="renderCanvas">');
 
-/** ---------------------------
- *  Voxel + Chunk System
- *  --------------------------- */
-const CHUNK_SIZE = 16;
-const CHUNK_VOL = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
+  // Prevent page scrolling/zoom while playing
+  document.documentElement.style.height = "100%";
+  document.body.style.height = "100%";
+  document.body.style.margin = "0";
+  document.body.style.overflow = "hidden";
+  document.body.style.touchAction = "none";
+  canvas.style.touchAction = "none";
 
-const BLOCK = {
-  AIR: 0,
-  ROAD: 1,
-  BUILDING: 2,
-  CRATE: 3,
-};
+  // iOS double-tap zoom prevention
+  let lastTouchEnd = 0;
+  document.addEventListener(
+    "touchend",
+    (e) => {
+      const now = Date.now();
+      if (now - lastTouchEnd <= 300) e.preventDefault();
+      lastTouchEnd = now;
+    },
+    { passive: false }
+  );
 
-function idx(lx, ly, lz) {
-  return lx + CHUNK_SIZE * (ly + CHUNK_SIZE * lz);
-}
-function floorDiv(n, d) {
-  return Math.floor(n / d);
-}
-function mod(n, d) {
-  return ((n % d) + d) % d;
-}
-function chunkKey(cx, cy, cz) {
-  return `${cx},${cy},${cz}`;
-}
+  /** ---------------------------
+   *  Engine + Scene
+   *  --------------------------- */
+  const engine = new BABYLON.Engine(canvas, true, {
+    preserveDrawingBuffer: true,
+    stencil: true,
+    disableWebGL2Support: false,
+  });
 
-class Chunk {
-  constructor(scene, cx, cy, cz) {
-    this.scene = scene;
-    this.cx = cx;
-    this.cy = cy;
-    this.cz = cz;
-    this.blocks = new Uint8Array(CHUNK_VOL); // all AIR
-    this.mesh = null;
-  }
-  get(lx, ly, lz) {
-    if (lx < 0 || ly < 0 || lz < 0 || lx >= CHUNK_SIZE || ly >= CHUNK_SIZE || lz >= CHUNK_SIZE) return BLOCK.AIR;
-    return this.blocks[idx(lx, ly, lz)];
-  }
-  set(lx, ly, lz, v) {
-    if (lx < 0 || ly < 0 || lz < 0 || lx >= CHUNK_SIZE || ly >= CHUNK_SIZE || lz >= CHUNK_SIZE) return;
-    this.blocks[idx(lx, ly, lz)] = v;
-  }
-  origin() {
-    return new BABYLON.Vector3(this.cx * CHUNK_SIZE, this.cy * CHUNK_SIZE, this.cz * CHUNK_SIZE);
-  }
-}
-
-class VoxelWorld {
-  constructor(scene) {
-    this.scene = scene;
-    this.chunks = new Map();
-    this.dirtyQueue = new Set(); // chunk keys
-
-    this.mat = new BABYLON.StandardMaterial("chunkMat", scene);
-    this.mat.specularColor = new BABYLON.Color3(0.1, 0.1, 0.1);
-    this.mat.backFaceCulling = true;
-  }
-
-  getChunk(cx, cy, cz, create = false) {
-    const key = chunkKey(cx, cy, cz);
-    let c = this.chunks.get(key);
-    if (!c && create) {
-      c = new Chunk(this.scene, cx, cy, cz);
-      this.chunks.set(key, c);
-      this.dirtyQueue.add(key);
-    }
-    return c;
-  }
-
-  getBlock(wx, wy, wz) {
-    const cx = floorDiv(wx, CHUNK_SIZE);
-    const cy = floorDiv(wy, CHUNK_SIZE);
-    const cz = floorDiv(wz, CHUNK_SIZE);
-    const c = this.getChunk(cx, cy, cz, false);
-    if (!c) return BLOCK.AIR;
-    const lx = mod(wx, CHUNK_SIZE);
-    const ly = mod(wy, CHUNK_SIZE);
-    const lz = mod(wz, CHUNK_SIZE);
-    return c.get(lx, ly, lz);
-  }
-
-  setBlock(wx, wy, wz, v) {
-    const cx = floorDiv(wx, CHUNK_SIZE);
-    const cy = floorDiv(wy, CHUNK_SIZE);
-    const cz = floorDiv(wz, CHUNK_SIZE);
-    const c = this.getChunk(cx, cy, cz, true);
-    const lx = mod(wx, CHUNK_SIZE);
-    const ly = mod(wy, CHUNK_SIZE);
-    const lz = mod(wz, CHUNK_SIZE);
-
-    c.set(lx, ly, lz, v);
-    this.markDirty(cx, cy, cz);
-
-    // Boundary neighbors dirty
-    if (lx === 0) this.markDirty(cx - 1, cy, cz);
-    if (lx === CHUNK_SIZE - 1) this.markDirty(cx + 1, cy, cz);
-    if (ly === 0) this.markDirty(cx, cy - 1, cz);
-    if (ly === CHUNK_SIZE - 1) this.markDirty(cx, cy + 1, cz);
-    if (lz === 0) this.markDirty(cx, cy, cz - 1);
-    if (lz === CHUNK_SIZE - 1) this.markDirty(cx, cy, cz + 1);
-  }
-
-  markDirty(cx, cy, cz) {
-    const key = chunkKey(cx, cy, cz);
-    if (this.chunks.has(key)) this.dirtyQueue.add(key);
-  }
-
-  rebuildSome(maxPerFrame = 2) {
-    let built = 0;
-    for (const key of this.dirtyQueue) {
-      const c = this.chunks.get(key);
-      if (c) this.buildChunkMesh(c);
-      this.dirtyQueue.delete(key);
-      built++;
-      if (built >= maxPerFrame) break;
-    }
-  }
-
-  buildChunkMesh(chunk) {
-    if (chunk.mesh) {
-      chunk.mesh.dispose();
-      chunk.mesh = null;
-    }
-
-    const positions = [];
-    const normals = [];
-    const indices = [];
-    const uvs = [];
-    const colors = [];
-
-    const origin = chunk.origin();
-
-    const faces = [
-      { n: [1, 0, 0],  v: [[1,0,0],[1,1,0],[1,1,1],[1,0,1]] }, // +X
-      { n: [-1,0,0],  v: [[0,0,1],[0,1,1],[0,1,0],[0,0,0]] }, // -X
-      { n: [0, 1, 0], v: [[0,1,1],[1,1,1],[1,1,0],[0,1,0]] }, // +Y
-      { n: [0,-1,0],  v: [[0,0,0],[1,0,0],[1,0,1],[0,0,1]] }, // -Y
-      { n: [0, 0, 1], v: [[1,0,1],[1,1,1],[0,1,1],[0,0,1]] }, // +Z
-      { n: [0, 0,-1], v: [[0,0,0],[0,1,0],[1,1,0],[1,0,0]] }, // -Z
-    ];
-
-    function blockColor(bt) {
-      if (bt === BLOCK.ROAD) return [0.10, 0.10, 0.12, 1];
-      if (bt === BLOCK.BUILDING) return [0.35, 0.38, 0.42, 1];
-      if (bt === BLOCK.CRATE) return [0.45, 0.30, 0.18, 1];
-      return [1, 1, 1, 1];
-    }
-
-    let vertCount = 0;
-
-    for (let lz = 0; lz < CHUNK_SIZE; lz++) {
-      for (let ly = 0; ly < CHUNK_SIZE; ly++) {
-        for (let lx = 0; lx < CHUNK_SIZE; lx++) {
-          const bt = chunk.get(lx, ly, lz);
-          if (bt === BLOCK.AIR) continue;
-
-          const wx = origin.x + lx;
-          const wy = origin.y + ly;
-          const wz = origin.z + lz;
-
-          const col = blockColor(bt);
-
-          for (let f = 0; f < faces.length; f++) {
-            const face = faces[f];
-            const nx = face.n[0], ny = face.n[1], nz = face.n[2];
-
-            const nb = this.getBlock(wx + nx, wy + ny, wz + nz);
-            if (nb !== BLOCK.AIR) continue;
-
-            for (let i = 0; i < 4; i++) {
-              const cv = face.v[i];
-              positions.push(wx + cv[0], wy + cv[1], wz + cv[2]);
-              normals.push(nx, ny, nz);
-              uvs.push(i === 0 || i === 3 ? 0 : 1, i < 2 ? 0 : 1);
-              colors.push(col[0], col[1], col[2], col[3]);
-            }
-
-            indices.push(
-              vertCount + 0, vertCount + 1, vertCount + 2,
-              vertCount + 0, vertCount + 2, vertCount + 3
-            );
-            vertCount += 4;
-          }
-        }
-      }
-    }
-
-    if (indices.length === 0) return;
-
-    const mesh = new BABYLON.Mesh(`chunk_${chunk.cx}_${chunk.cy}_${chunk.cz}`, this.scene);
-    mesh.material = this.mat;
-    mesh.checkCollisions = true;
-
-    const vd = new BABYLON.VertexData();
-    vd.positions = positions;
-    vd.normals = normals;
-    vd.indices = indices;
-    vd.uvs = uvs;
-    vd.colors = colors;
-    vd.applyToMesh(mesh, true);
-
-    chunk.mesh = mesh;
-  }
-}
-
-/** ---------------------------
- *  Scene
- *  --------------------------- */
-function makeScene() {
   const scene = new BABYLON.Scene(engine);
-  scene.clearColor = new BABYLON.Color4(0.05, 0.06, 0.08, 1);
+  scene.clearColor = new BABYLON.Color4(0.75, 0.87, 1.0, 1.0);
+  scene.collisionsEnabled = true;
+  scene.gravity = new BABYLON.Vector3(0, -0.6, 0); // tuned for non-physics moveWithCollisions feel
 
   // Light
   const hemi = new BABYLON.HemisphericLight("hemi", new BABYLON.Vector3(0.2, 1, 0.2), scene);
   hemi.intensity = 0.9;
 
-  const dir = new BABYLON.DirectionalLight("dir", new BABYLON.Vector3(-0.4, -1, 0.2), scene);
-  dir.position = new BABYLON.Vector3(40, 80, -40);
+  const dir = new BABYLON.DirectionalLight("dir", new BABYLON.Vector3(-0.4, -1, -0.3), scene);
+  dir.position = new BABYLON.Vector3(40, 80, 40);
   dir.intensity = 0.6;
 
-  // Invisible ground collider
-  const ground = BABYLON.MeshBuilder.CreateGround("ground", { width: 260, height: 260 }, scene);
-  ground.isVisible = false;
-  ground.checkCollisions = true;
+  /** ---------------------------
+   *  UI creation (if missing)
+   *  --------------------------- */
+  const uiRoot =
+    document.getElementById("uiRoot") ||
+    (() => {
+      const d = document.createElement("div");
+      d.id = "uiRoot";
+      d.style.position = "fixed";
+      d.style.inset = "0";
+      d.style.pointerEvents = "none";
+      d.style.userSelect = "none";
+      d.style.webkitUserSelect = "none";
+      d.style.touchAction = "none";
+      document.body.appendChild(d);
+      return d;
+    })();
 
-  // Player collider
-  const player = BABYLON.MeshBuilder.CreateCapsule("player", { height: 2.0, radius: 0.45 }, scene);
-  player.isVisible = false;
-  player.position = new BABYLON.Vector3(0, 3, 0);
-  player.checkCollisions = true;
+  function makeButton(id, label, rightPx, bottomPx) {
+    let b = document.getElementById(id);
+    if (b) return b;
+    b = document.createElement("button");
+    b.id = id;
+    b.textContent = label;
+    b.style.position = "fixed";
+    b.style.right = rightPx + "px";
+    b.style.bottom = bottomPx + "px";
+    b.style.width = "86px";
+    b.style.height = "86px";
+    b.style.borderRadius = "18px";
+    b.style.border = "1px solid rgba(0,0,0,0.2)";
+    b.style.background = "rgba(255,255,255,0.75)";
+    b.style.backdropFilter = "blur(6px)";
+    b.style.webkitBackdropFilter = "blur(6px)";
+    b.style.font = "600 16px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    b.style.color = "#111";
+    b.style.pointerEvents = "auto";
+    b.style.touchAction = "none";
+    b.style.webkitTapHighlightColor = "transparent";
+    b.style.boxShadow = "0 10px 25px rgba(0,0,0,0.15)";
+    // prevent iOS zoom/scroll on buttons
+    b.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
+    uiRoot.appendChild(b);
+    return b;
+  }
 
-  // Camera (disable touch controls by NOT attaching to canvas)
-  const camera = new BABYLON.FollowCamera("cam", new BABYLON.Vector3(0, 6, -10), scene, player);
-  camera.radius = 10;
-  camera.heightOffset = 3.2;
-  camera.rotationOffset = 180;
-  camera.cameraAcceleration = 0.05;
-  camera.maxCameraSpeed = 10;
+  function makeStatus() {
+    let s = document.getElementById("status");
+    if (s) return s;
+    s = document.createElement("div");
+    s.id = "status";
+    s.style.position = "fixed";
+    s.style.left = "12px";
+    s.style.top = "10px";
+    s.style.padding = "8px 10px";
+    s.style.borderRadius = "12px";
+    s.style.background = "rgba(255,255,255,0.65)";
+    s.style.border = "1px solid rgba(0,0,0,0.12)";
+    s.style.backdropFilter = "blur(6px)";
+    s.style.webkitBackdropFilter = "blur(6px)";
+    s.style.font = "500 13px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    s.style.color = "#111";
+    s.style.pointerEvents = "none";
+    uiRoot.appendChild(s);
+    return s;
+  }
 
-  // Keep camera above horizon / stable
-  camera.lowerRotationLimit = BABYLON.Tools.ToRadians(5);
-  camera.upperRotationLimit = BABYLON.Tools.ToRadians(55);
-  camera.lowerRadiusLimit = 8;
-  camera.upperRadiusLimit = 12;
+  function makeJoystick(name, side /* 'left' | 'right' */) {
+    const wrapId = `${name}JoyWrap`;
+    let wrap = document.getElementById(wrapId);
+    if (wrap) return wrap;
 
-  // Gravity + collisions
-  scene.collisionsEnabled = true;
-  scene.gravity = new BABYLON.Vector3(0, -0.45, 0);
-  player.ellipsoid = new BABYLON.Vector3(0.45, 0.9, 0.45);
-  player.ellipsoidOffset = new BABYLON.Vector3(0, 0.9, 0);
+    wrap = document.createElement("div");
+    wrap.id = wrapId;
+    wrap.style.position = "fixed";
+    wrap.style.bottom = "16px";
+    wrap.style[side] = "16px";
+    wrap.style.width = "160px";
+    wrap.style.height = "160px";
+    wrap.style.borderRadius = "28px";
+    wrap.style.background = "rgba(255,255,255,0.10)";
+    wrap.style.border = "1px solid rgba(255,255,255,0.20)";
+    wrap.style.boxShadow = "0 10px 30px rgba(0,0,0,0.12)";
+    wrap.style.pointerEvents = "auto";
+    wrap.style.touchAction = "none";
+    wrap.style.webkitTapHighlightColor = "transparent";
 
-  // Voxel world
-  const vox = new VoxelWorld(scene);
+    const base = document.createElement("div");
+    base.style.position = "absolute";
+    base.style.inset = "12px";
+    base.style.borderRadius = "22px";
+    base.style.background = "rgba(255,255,255,0.12)";
+    base.style.border = "1px solid rgba(255,255,255,0.18)";
+    base.style.backdropFilter = "blur(4px)";
+    base.style.webkitBackdropFilter = "blur(4px)";
+    base.style.pointerEvents = "none";
+    wrap.appendChild(base);
 
-  function fillBox(x0, y0, z0, x1, y1, z1, type) {
-    for (let z = z0; z < z1; z++) {
-      for (let y = y0; y < y1; y++) {
-        for (let x = x0; x < x1; x++) vox.setBlock(x, y, z, type);
+    const knob = document.createElement("div");
+    knob.style.position = "absolute";
+    knob.style.left = "50%";
+    knob.style.top = "50%";
+    knob.style.width = "64px";
+    knob.style.height = "64px";
+    knob.style.marginLeft = "-32px";
+    knob.style.marginTop = "-32px";
+    knob.style.borderRadius = "22px";
+    knob.style.background = "rgba(255,255,255,0.65)";
+    knob.style.border = "1px solid rgba(0,0,0,0.18)";
+    knob.style.boxShadow = "0 10px 20px rgba(0,0,0,0.12)";
+    knob.style.pointerEvents = "none";
+    wrap.appendChild(knob);
+
+    uiRoot.appendChild(wrap);
+    return wrap;
+  }
+
+  const statusEl = makeStatus();
+  const breakBtn = makeButton("breakBtn", "Break", 16, 16 + 86 + 12);
+  const jumpBtn = makeButton("jumpBtn", "Jump", 16, 16);
+
+  const leftJoyWrap = makeJoystick("left", "left");
+  const rightJoyWrap = makeJoystick("right", "right");
+
+  /** ---------------------------
+   *  Stable joystick using Pointer Events
+   *  --------------------------- */
+  class VirtualJoystick {
+    constructor(wrapEl) {
+      this.wrapEl = wrapEl;
+      this.knobEl = wrapEl.querySelector("div:last-child"); // knob
+      this.active = false;
+      this.pointerId = null;
+      this.center = { x: 0, y: 0 };
+      this.value = { x: 0, y: 0 };
+      this.radius = 58; // pixels from center
+      this._bind();
+    }
+
+    _bind() {
+      const el = this.wrapEl;
+
+      const getRectCenter = () => {
+        const r = el.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      };
+
+      const setKnob = (vx, vy) => {
+        // vx,vy in [-1,1]
+        const px = vx * this.radius;
+        const py = vy * this.radius;
+        this.knobEl.style.transform = `translate(${px}px, ${py}px)`;
+      };
+
+      const onDown = (e) => {
+        e.preventDefault();
+        this.active = true;
+        this.pointerId = e.pointerId;
+        this.center = getRectCenter();
+        el.setPointerCapture(this.pointerId);
+        onMove(e);
+      };
+
+      const onMove = (e) => {
+        if (!this.active || e.pointerId !== this.pointerId) return;
+        e.preventDefault();
+        const dx = e.clientX - this.center.x;
+        const dy = e.clientY - this.center.y;
+        const len = Math.hypot(dx, dy);
+        const max = this.radius;
+        const cl = len > max ? max / len : 1;
+
+        const nx = (dx * cl) / max;
+        const ny = (dy * cl) / max;
+
+        this.value.x = nx;
+        this.value.y = ny;
+        setKnob(nx, ny);
+      };
+
+      const onUp = (e) => {
+        if (!this.active || e.pointerId !== this.pointerId) return;
+        e.preventDefault();
+        this.active = false;
+        this.pointerId = null;
+        this.value.x = 0;
+        this.value.y = 0;
+        this.knobEl.style.transform = `translate(0px, 0px)`;
+      };
+
+      el.addEventListener("pointerdown", onDown, { passive: false });
+      el.addEventListener("pointermove", onMove, { passive: false });
+      el.addEventListener("pointerup", onUp, { passive: false });
+      el.addEventListener("pointercancel", onUp, { passive: false });
+      el.addEventListener("contextmenu", (e) => e.preventDefault());
+    }
+  }
+
+  const leftJoy = new VirtualJoystick(leftJoyWrap);
+  const rightJoy = new VirtualJoystick(rightJoyWrap);
+
+  /** ---------------------------
+   *  Voxel + Chunk System
+   *  --------------------------- */
+  const CHUNK_SIZE = 16;
+  const CHUNK_VOL = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
+
+  const BLOCK = {
+    AIR: 0,
+    ROAD: 1,
+    BUILDING: 2,
+    CRATE: 3,
+  };
+
+  function idx(lx, ly, lz) {
+    return lx + CHUNK_SIZE * (ly + CHUNK_SIZE * lz);
+  }
+  function floorDiv(n, d) {
+    return Math.floor(n / d);
+  }
+  function mod(n, d) {
+    return ((n % d) + d) % d;
+  }
+  function key(cx, cy, cz) {
+    return `${cx},${cy},${cz}`;
+  }
+
+  // Per-vertex colors
+  const COLOR = {
+    [BLOCK.ROAD]: new BABYLON.Color4(0.18, 0.18, 0.20, 1),
+    [BLOCK.BUILDING]: new BABYLON.Color4(0.70, 0.74, 0.78, 1),
+    [BLOCK.CRATE]: new BABYLON.Color4(0.58, 0.40, 0.22, 1),
+  };
+
+  const DIRS = [
+    { n: [1, 0, 0], u: [0, 1, 0], v: [0, 0, 1] }, // +X
+    { n: [-1, 0, 0], u: [0, 1, 0], v: [0, 0, -1] }, // -X
+    { n: [0, 1, 0], u: [1, 0, 0], v: [0, 0, -1] }, // +Y
+    { n: [0, -1, 0], u: [1, 0, 0], v: [0, 0, 1] }, // -Y
+    { n: [0, 0, 1], u: [1, 0, 0], v: [0, 1, 0] }, // +Z
+    { n: [0, 0, -1], u: [-1, 0, 0], v: [0, 1, 0] }, // -Z
+  ];
+
+  class Chunk {
+    constructor(world, cx, cy, cz) {
+      this.world = world;
+      this.cx = cx;
+      this.cy = cy;
+      this.cz = cz;
+      this.blocks = new Uint8Array(CHUNK_VOL);
+      this.mesh = null;
+      this.dirty = true;
+      this.inQueue = false;
+    }
+
+    getLocal(lx, ly, lz) {
+      if (lx < 0 || ly < 0 || lz < 0 || lx >= CHUNK_SIZE || ly >= CHUNK_SIZE || lz >= CHUNK_SIZE) return BLOCK.AIR;
+      return this.blocks[idx(lx, ly, lz)];
+    }
+
+    setLocal(lx, ly, lz, v) {
+      if (lx < 0 || ly < 0 || lz < 0 || lx >= CHUNK_SIZE || ly >= CHUNK_SIZE || lz >= CHUNK_SIZE) return;
+      this.blocks[idx(lx, ly, lz)] = v;
+    }
+
+    worldOrigin() {
+      return {
+        x: this.cx * CHUNK_SIZE,
+        y: this.cy * CHUNK_SIZE,
+        z: this.cz * CHUNK_SIZE,
+      };
+    }
+
+    rebuildMesh() {
+      const scene = this.world.scene;
+      const origin = this.worldOrigin();
+
+      const positions = [];
+      const normals = [];
+      const indices = [];
+      const colors = [];
+
+      let vertCount = 0;
+
+      const pushColor = (c) => {
+        colors.push(c.r, c.g, c.b, c.a);
+      };
+
+      for (let lz = 0; lz < CHUNK_SIZE; lz++) {
+        for (let ly = 0; ly < CHUNK_SIZE; ly++) {
+          for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+            const b = this.getLocal(lx, ly, lz);
+            if (b === BLOCK.AIR) continue;
+
+            const wx = origin.x + lx;
+            const wy = origin.y + ly;
+            const wz = origin.z + lz;
+
+            for (let f = 0; f < 6; f++) {
+              const d = DIRS[f];
+              const nx = d.n[0],
+                ny = d.n[1],
+                nz = d.n[2];
+
+              // Neighbor block in world coords
+              const nb = this.world.getBlock(wx + nx, wy + ny, wz + nz);
+              if (nb !== BLOCK.AIR) continue;
+
+              // Face corners: p, p+u, p+u+v, p+v
+              // For each axis-aligned face, base corner is at voxel position plus offset depending on normal
+              const ox = wx + (nx === 1 ? 1 : 0);
+              const oy = wy + (ny === 1 ? 1 : 0);
+              const oz = wz + (nz === 1 ? 1 : 0);
+
+              const ux = d.u[0],
+                uy = d.u[1],
+                uz = d.u[2];
+              const vx = d.v[0],
+                vy = d.v[1],
+                vz = d.v[2];
+
+              const p0 = [ox, oy, oz];
+              const p1 = [ox + ux, oy + uy, oz + uz];
+              const p2 = [ox + ux + vx, oy + uy + vy, oz + uz + vz];
+              const p3 = [ox + vx, oy + vy, oz + vz];
+
+              positions.push(...p0, ...p1, ...p2, ...p3);
+
+              // Normals (same for all 4 verts)
+              for (let i = 0; i < 4; i++) normals.push(nx, ny, nz);
+
+              const c = COLOR[b] || new BABYLON.Color4(1, 1, 1, 1);
+              // slight per-face variation to avoid flat look
+              const shade = f === 2 ? 1.07 : f === 3 ? 0.92 : 1.0;
+              const cc = new BABYLON.Color4(
+                Math.min(1, c.r * shade),
+                Math.min(1, c.g * shade),
+                Math.min(1, c.b * shade),
+                c.a
+              );
+              for (let i = 0; i < 4; i++) pushColor(cc);
+
+              // Winding
+              indices.push(vertCount + 0, vertCount + 1, vertCount + 2, vertCount + 0, vertCount + 2, vertCount + 3);
+              vertCount += 4;
+            }
+          }
+        }
+      }
+
+      // Create or update mesh
+      if (!this.mesh) {
+        this.mesh = new BABYLON.Mesh(`chunk_${this.cx}_${this.cy}_${this.cz}`, scene);
+        this.mesh.checkCollisions = true;
+        this.mesh.isPickable = true;
+        this.mesh.metadata = { isChunk: true, cx: this.cx, cy: this.cy, cz: this.cz };
+
+        const mat = new BABYLON.StandardMaterial(`mat_${this.cx}_${this.cy}_${this.cz}`, scene);
+        mat.vertexColorEnabled = true;
+        mat.specularColor = new BABYLON.Color3(0.05, 0.05, 0.05);
+        mat.backFaceCulling = true;
+        this.mesh.material = mat;
+      } else {
+        // wipe old geometry
+        this.mesh.geometry?.dispose();
+      }
+
+      if (positions.length === 0) {
+        // No faces -> keep an empty mesh to remain pickable? better disable pick + collisions
+        this.mesh.isPickable = false;
+        this.mesh.checkCollisions = false;
+        this.mesh.setEnabled(false);
+      } else {
+        this.mesh.setEnabled(true);
+        this.mesh.isPickable = true;
+        this.mesh.checkCollisions = true;
+
+        const vd = new BABYLON.VertexData();
+        vd.positions = positions;
+        vd.indices = indices;
+        vd.normals = normals;
+        vd.colors = colors;
+        vd.applyToMesh(this.mesh, true);
+      }
+
+      this.dirty = false;
+      this.inQueue = false;
+    }
+  }
+
+  class VoxelWorld {
+    constructor(scene) {
+      this.scene = scene;
+      this.chunks = new Map();
+      this.dirtyQueue = [];
+      this.dirtySet = new Set();
+    }
+
+    getChunk(cx, cy, cz, create = false) {
+      const k = key(cx, cy, cz);
+      let c = this.chunks.get(k);
+      if (!c && create) {
+        c = new Chunk(this, cx, cy, cz);
+        this.chunks.set(k, c);
+      }
+      return c || null;
+    }
+
+    getBlock(x, y, z) {
+      const cx = floorDiv(x, CHUNK_SIZE);
+      const cy = floorDiv(y, CHUNK_SIZE);
+      const cz = floorDiv(z, CHUNK_SIZE);
+      const c = this.getChunk(cx, cy, cz, false);
+      if (!c) return BLOCK.AIR;
+      const lx = mod(x, CHUNK_SIZE);
+      const ly = mod(y, CHUNK_SIZE);
+      const lz = mod(z, CHUNK_SIZE);
+      return c.getLocal(lx, ly, lz);
+    }
+
+    setBlock(x, y, z, v) {
+      const cx = floorDiv(x, CHUNK_SIZE);
+      const cy = floorDiv(y, CHUNK_SIZE);
+      const cz = floorDiv(z, CHUNK_SIZE);
+      const c = this.getChunk(cx, cy, cz, true);
+      const lx = mod(x, CHUNK_SIZE);
+      const ly = mod(y, CHUNK_SIZE);
+      const lz = mod(z, CHUNK_SIZE);
+      c.setLocal(lx, ly, lz, v);
+
+      this.markDirty(cx, cy, cz);
+
+      // If changed block on boundary, neighbor chunk face exposure changes too
+      if (lx === 0) this.markDirty(cx - 1, cy, cz);
+      if (lx === CHUNK_SIZE - 1) this.markDirty(cx + 1, cy, cz);
+      if (ly === 0) this.markDirty(cx, cy - 1, cz);
+      if (ly === CHUNK_SIZE - 1) this.markDirty(cx, cy + 1, cz);
+      if (lz === 0) this.markDirty(cx, cy, cz - 1);
+      if (lz === CHUNK_SIZE - 1) this.markDirty(cx, cy, cz + 1);
+    }
+
+    markDirty(cx, cy, cz) {
+      const c = this.getChunk(cx, cy, cz, false);
+      if (!c) return;
+      c.dirty = true;
+      const k = key(cx, cy, cz);
+      if (!this.dirtySet.has(k)) {
+        this.dirtySet.add(k);
+        c.inQueue = true;
+        this.dirtyQueue.push(c);
+      }
+    }
+
+    drainDirtyAll() {
+      while (this.dirtyQueue.length) {
+        const c = this.dirtyQueue.shift();
+        const k = key(c.cx, c.cy, c.cz);
+        this.dirtySet.delete(k);
+        if (c.dirty) c.rebuildMesh();
+      }
+    }
+
+    rebuildSome(maxPerFrame = 2) {
+      let n = 0;
+      while (n < maxPerFrame && this.dirtyQueue.length) {
+        const c = this.dirtyQueue.shift();
+        const k = key(c.cx, c.cy, c.cz);
+        this.dirtySet.delete(k);
+        if (c.dirty) c.rebuildMesh();
+        n++;
       }
     }
   }
 
-  // Roads
-  for (let z = -120; z < 120; z++) {
-    for (let x = -120; x < 120; x++) {
-      vox.setBlock(x, 0, z, BLOCK.ROAD);
+  const world = new VoxelWorld(scene);
+
+  /** ---------------------------
+   *  City generation (voxel data)
+   *  --------------------------- */
+  // City dimensions in blocks
+  const CITY_HALF = 64; // extends [-CITY_HALF..CITY_HALF)
+  const GROUND_Y = 0;
+
+  // Ensure chunk existence in range (for startup mesh build)
+  function ensureChunkRange(x0, x1, y0, y1, z0, z1) {
+    const cx0 = floorDiv(x0, CHUNK_SIZE);
+    const cx1 = floorDiv(x1, CHUNK_SIZE);
+    const cy0 = floorDiv(y0, CHUNK_SIZE);
+    const cy1 = floorDiv(y1, CHUNK_SIZE);
+    const cz0 = floorDiv(z0, CHUNK_SIZE);
+    const cz1 = floorDiv(z1, CHUNK_SIZE);
+    for (let cz = cz0; cz <= cz1; cz++) {
+      for (let cy = cy0; cy <= cy1; cy++) {
+        for (let cx = cx0; cx <= cx1; cx++) {
+          world.getChunk(cx, cy, cz, true);
+        }
+      }
     }
   }
 
-  // Buildings
-  const spacing = 18;
-  const half = 4;
-  for (let ix = -half; ix <= half; ix++) {
-    for (let iz = -half; iz <= half; iz++) {
-      if (ix === 0 || iz === 0) continue;
+  // Pre-create chunks covering ground and building heights
+  ensureChunkRange(-CITY_HALF, CITY_HALF - 1, 0, 32, -CITY_HALF, CITY_HALF - 1);
 
-      const baseX = ix * spacing;
-      const baseZ = iz * spacing;
-
-      const bw = Math.floor(8 + Math.random() * 6);
-      const bd = Math.floor(8 + Math.random() * 6);
-      const bh = Math.floor(6 + Math.random() * 18);
-
-      fillBox(baseX, 1, baseZ, baseX + bw, 1 + bh, baseZ + bd, BLOCK.BUILDING);
+  // Ground/road layer
+  for (let z = -CITY_HALF; z < CITY_HALF; z++) {
+    for (let x = -CITY_HALF; x < CITY_HALF; x++) {
+      // Simple road grid: thick main roads every 8 blocks, with intersections
+      const ax = Math.abs(x);
+      const az = Math.abs(z);
+      const isRoad =
+        (ax % 16 <= 2) || (az % 16 <= 2) || (ax <= 2) || (az <= 2); // plus central cross
+      world.setBlock(x, GROUND_Y, z, isRoad ? BLOCK.ROAD : BLOCK.ROAD); // keep all as ROAD for collision base
     }
   }
 
-  // Crates
-  for (let i = 0; i < 50; i++) {
-    const x = Math.floor((Math.random() - 0.5) * 180);
-    const z = Math.floor((Math.random() - 0.5) * 180);
-    vox.setBlock(x, 1, z, BLOCK.CRATE);
+  // Buildings on lots: grid spacing
+  function rand01(seed) {
+    // deterministic-ish hash
+    const s = Math.sin(seed) * 10000;
+    return s - Math.floor(s);
   }
 
-  // Build ALL initial chunks now (one-time) so joystick is smooth
-  while (vox.dirtyQueue.size > 0) {
-    vox.rebuildSome(50);
-  }
+  const lotStep = 8;
+  for (let gz = -CITY_HALF + 4; gz < CITY_HALF - 4; gz += lotStep) {
+    for (let gx = -CITY_HALF + 4; gx < CITY_HALF - 4; gx += lotStep) {
+      // Skip road corridors
+      const isRoadCorridor = (Math.abs(gx) % 16 <= 2) || (Math.abs(gz) % 16 <= 2) || (Math.abs(gx) <= 2) || (Math.abs(gz) <= 2);
+      if (isRoadCorridor) continue;
 
-  // Creeper mesh
-  const creeper = BABYLON.MeshBuilder.CreateBox("creeper", { size: 1.6 }, scene);
-  creeper.position = new BABYLON.Vector3(20, 1.0, 20);
-  creeper.checkCollisions = true;
+      const seed = gx * 1337 + gz * 7331;
+      const chance = rand01(seed);
+      if (chance < 0.35) continue;
 
-  const cmat = new BABYLON.StandardMaterial("cmat", scene);
-  cmat.diffuseColor = new BABYLON.Color3(0.10, 0.70, 0.25);
-  creeper.material = cmat;
+      const w = 3 + Math.floor(rand01(seed + 1) * 4); // 3..6
+      const d = 3 + Math.floor(rand01(seed + 2) * 4);
+      const h = 4 + Math.floor(rand01(seed + 3) * 14); // 4..17
 
-  // Creeper AI
-  let creeperTarget = new BABYLON.Vector3(0, 0, 0);
-  let nextWanderAt = 0;
-  let explodeCooldown = 0;
+      const x0 = gx - Math.floor(w / 2);
+      const z0 = gz - Math.floor(d / 2);
 
-  function pickWanderTarget() {
-    creeperTarget = new BABYLON.Vector3((Math.random() - 0.5) * 160, 0, (Math.random() - 0.5) * 160);
-  }
-  pickWanderTarget();
-
-  // Touch joystick input (improved for iPad)
-  const pad = document.getElementById("pad");
-  const stick = document.getElementById("stick");
-
-  let moveX = 0, moveZ = 0; // [-1..1]
-  let touching = false;
-  let padRect = null;
-  let padCenter = { x: 0, y: 0 };
-
-  function updatePadGeometry() {
-    padRect = pad.getBoundingClientRect();
-    padCenter = { x: padRect.left + padRect.width / 2, y: padRect.top + padRect.height / 2 };
-  }
-  window.addEventListener("resize", updatePadGeometry);
-  updatePadGeometry();
-
-  function setStick(dx, dy) {
-    const max = 45;
-    const mag = Math.hypot(dx, dy);
-    const clamp = mag > max ? max / mag : 1;
-    const sx = dx * clamp;
-    const sy = dy * clamp;
-
-    stick.style.left = `${35 + sx}px`;
-    stick.style.top = `${35 + sy}px`;
-
-    moveX = sx / max;
-    moveZ = sy / max;
-  }
-
-  pad.addEventListener(
-    "pointerdown",
-    (e) => {
-      e.preventDefault();
-      pad.setPointerCapture(e.pointerId);
-      touching = true;
-      updatePadGeometry();
-      setStick(e.clientX - padCenter.x, e.clientY - padCenter.y);
-    },
-    { passive: false }
-  );
-
-  pad.addEventListener(
-    "pointermove",
-    (e) => {
-      if (!touching) return;
-      e.preventDefault();
-      setStick(e.clientX - padCenter.x, e.clientY - padCenter.y);
-    },
-    { passive: false }
-  );
-
-  function endPad() {
-    touching = false;
-    stick.style.left = `35px`;
-    stick.style.top = `35px`;
-    moveX = 0;
-    moveZ = 0;
-  }
-  pad.addEventListener("pointerup", endPad);
-  pad.addEventListener("pointercancel", endPad);
-
-  // Jump
-  let yVelocity = 0;
-  let onGround = false;
-
-  function tryJump(e) {
-    if (e && e.preventDefault) e.preventDefault();
-    if (onGround) yVelocity = 0.22;
-  }
-  jumpBtn.addEventListener("click", tryJump);
-  jumpBtn.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
-
-  // Break voxel
-  function tryBreak(e) {
-    if (e && e.preventDefault) e.preventDefault();
-
-    const pick = scene.pick(engine.getRenderWidth() / 2, engine.getRenderHeight() / 2);
-    if (!pick || !pick.hit || !pick.pickedPoint) return;
-    if (!pick.pickedMesh || typeof pick.pickedMesh.name !== "string" || !pick.pickedMesh.name.startsWith("chunk_")) return;
-
-    const n = pick.getNormal(true);
-    if (!n) return;
-
-    const p = pick.pickedPoint;
-    const eps = 0.01;
-
-    const wx = Math.floor(p.x - n.x * eps);
-    const wy = Math.floor(p.y - n.y * eps);
-    const wz = Math.floor(p.z - n.z * eps);
-
-    if (vox.getBlock(wx, wy, wz) !== BLOCK.AIR) {
-      vox.setBlock(wx, wy, wz, BLOCK.AIR);
-    }
-  }
-  breakBtn.addEventListener("click", tryBreak);
-  breakBtn.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
-
-  // Explosion: delete voxels around point, shake camera
-  function explodeAt(pos) {
-    const radius = 10;
-    const r2 = radius * radius;
-
-    const minX = Math.floor(pos.x - radius);
-    const maxX = Math.floor(pos.x + radius);
-    const minY = Math.floor(pos.y - radius);
-    const maxY = Math.floor(pos.y + radius);
-    const minZ = Math.floor(pos.z - radius);
-    const maxZ = Math.floor(pos.z + radius);
-
-    for (let z = minZ; z <= maxZ; z++) {
-      for (let y = minY; y <= maxY; y++) {
-        for (let x = minX; x <= maxX; x++) {
-          const dx = (x + 0.5) - pos.x;
-          const dy = (y + 0.5) - pos.y;
-          const dz = (z + 0.5) - pos.z;
-          if (dx * dx + dy * dy + dz * dz <= r2) {
-            if (vox.getBlock(x, y, z) !== BLOCK.AIR) vox.setBlock(x, y, z, BLOCK.AIR);
+      for (let y = 1; y <= h; y++) {
+        for (let z = z0; z < z0 + d; z++) {
+          for (let x = x0; x < x0 + w; x++) {
+            world.setBlock(x, y, z, BLOCK.BUILDING);
           }
         }
       }
     }
-
-    const original = camera.radius;
-    camera.radius = original + 2;
-    setTimeout(() => (camera.radius = original), 150);
   }
 
-  // Main loop
-  scene.onBeforeRenderObservable.add(() => {
-    const dt = engine.getDeltaTime() / 1000;
+  // Scattered crates
+  for (let i = 0; i < 220; i++) {
+    const seed = i * 999;
+    const x = Math.floor((rand01(seed + 1) * 2 - 1) * (CITY_HALF - 4));
+    const z = Math.floor((rand01(seed + 2) * 2 - 1) * (CITY_HALF - 4));
+    // avoid central roads a bit
+    if ((Math.abs(x) % 16 <= 2) || (Math.abs(z) % 16 <= 2) || (Math.abs(x) <= 2) || (Math.abs(z) <= 2)) continue;
+    world.setBlock(x, 1, z, BLOCK.CRATE);
+    if (rand01(seed + 3) > 0.7) world.setBlock(x, 2, z, BLOCK.CRATE);
+  }
 
-    // Only rebuild during gameplay when there are edits/explosions
-    if (vox.dirtyQueue.size > 0) vox.rebuildSome(2);
-
-    // Player movement relative to camera forward/right on XZ
-    const forward = camera.getForwardRay().direction;
-    const f = new BABYLON.Vector3(forward.x, 0, forward.z).normalize();
-    const r = new BABYLON.Vector3(f.z, 0, -f.x).normalize();
-
-    const speed = 10;
-    const desired = r.scale(moveX).add(f.scale(moveZ));
-    const move = desired.scale(speed * dt);
-
-    yVelocity += scene.gravity.y * dt;
-    const vertical = new BABYLON.Vector3(0, yVelocity, 0);
-
-    player.moveWithCollisions(move.add(vertical));
-
-    onGround = Math.abs(yVelocity) < 0.02 && player.position.y <= 2.01;
-    if (onGround) {
-      yVelocity = 0;
-      player.position.y = Math.max(player.position.y, 2);
+  // Mark all chunks dirty once after generation, then build up-front
+  for (const c of world.chunks.values()) {
+    c.dirty = true;
+    if (!c.inQueue) {
+      c.inQueue = true;
+      world.dirtyQueue.push(c);
+      world.dirtySet.add(key(c.cx, c.cy, c.cz));
     }
+  }
+  world.drainDirtyAll(); // build everything up-front
 
-    const distToPlayer = BABYLON.Vector3.Distance(creeper.position, player.position);
-    explodeCooldown = Math.max(0, explodeCooldown - dt);
+  /** ---------------------------
+   *  Player (invisible capsule collider)
+   *  --------------------------- */
+  const player = BABYLON.MeshBuilder.CreateCapsule(
+    "player",
+    { radius: 0.45, height: 1.7, tessellation: 8, subdivisions: 1 },
+    scene
+  );
+  player.isVisible = false;
+  player.checkCollisions = true;
+  player.ellipsoid = new BABYLON.Vector3(0.45, 0.85, 0.45);
+  player.ellipsoidOffset = new BABYLON.Vector3(0, 0.85, 0);
+  player.position.set(0, 3, 10);
 
-    let target;
-    if (distToPlayer < 28) {
-      target = player.position.clone();
-    } else {
-      if (performance.now() > nextWanderAt) {
-        pickWanderTarget();
-        nextWanderAt = performance.now() + 2500 + Math.random() * 2500;
+  // FollowCamera (no attachControl — no touch gestures)
+  const camera = new BABYLON.FollowCamera("cam", new BABYLON.Vector3(0, 6, -12), scene);
+  camera.lockedTarget = player;
+  camera.radius = 10;
+  camera.heightOffset = 4;
+  camera.rotationOffset = 180;
+  camera.cameraAcceleration = 0.08;
+  camera.maxCameraSpeed = 12;
+  scene.activeCamera = camera;
+
+  // Smooth movement
+  const move = {
+    vel: new BABYLON.Vector3(0, 0, 0),
+    wish: new BABYLON.Vector3(0, 0, 0),
+    grounded: false,
+    lastGroundedTime: 0,
+    jumpRequested: false,
+  };
+
+  function nowSec() {
+    return performance.now() / 1000;
+  }
+
+  // Button state
+  const btnState = { breakPressed: false };
+
+  function bindPressHold(btn, onDown, onUp) {
+    const down = (e) => {
+      e.preventDefault();
+      onDown();
+    };
+    const up = (e) => {
+      e.preventDefault();
+      onUp();
+    };
+    btn.addEventListener("pointerdown", down, { passive: false });
+    btn.addEventListener("pointerup", up, { passive: false });
+    btn.addEventListener("pointercancel", up, { passive: false });
+    btn.addEventListener("pointerleave", up, { passive: false });
+    btn.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
+  }
+
+  bindPressHold(
+    jumpBtn,
+    () => {
+      move.jumpRequested = true;
+    },
+    () => {}
+  );
+
+  bindPressHold(
+    breakBtn,
+    () => {
+      btnState.breakPressed = true;
+    },
+    () => {
+      btnState.breakPressed = false;
+    }
+  );
+
+  /** ---------------------------
+   *  Break action (raycast from screen center)
+   *  --------------------------- */
+  function breakTargetVoxel() {
+    const w = engine.getRenderWidth();
+    const h = engine.getRenderHeight();
+    const ray = scene.createPickingRay(w / 2, h / 2, BABYLON.Matrix.Identity(), camera);
+
+    const hit = scene.pickWithRay(ray, (m) => !!m && m.isEnabled() && m.metadata && m.metadata.isChunk);
+    if (!hit || !hit.hit || !hit.pickedPoint || !hit.getNormal()) return false;
+
+    const n = hit.getNormal(true);
+    const p = hit.pickedPoint;
+
+    // Move slightly inside the hit block along -normal
+    const inside = p.subtract(n.scale(0.02));
+    const vx = Math.floor(inside.x);
+    const vy = Math.floor(inside.y);
+    const vz = Math.floor(inside.z);
+
+    const cur = world.getBlock(vx, vy, vz);
+    if (cur === BLOCK.AIR) return false;
+
+    world.setBlock(vx, vy, vz, BLOCK.AIR);
+    return true;
+  }
+
+  /** ---------------------------
+   *  Creeper-like enemy
+   *  --------------------------- */
+  const creeper = BABYLON.MeshBuilder.CreateBox("creeper", { size: 1.0 }, scene);
+  creeper.position.set(8, 2, 8);
+  creeper.checkCollisions = true;
+  creeper.isPickable = false;
+  const creeperMat = new BABYLON.StandardMaterial("creeperMat", scene);
+  creeperMat.diffuseColor = new BABYLON.Color3(0.2, 0.75, 0.25);
+  creeperMat.specularColor = new BABYLON.Color3(0.05, 0.05, 0.05);
+  creeper.material = creeperMat;
+
+  const creeperState = {
+    dir: new BABYLON.Vector3(1, 0, 0),
+    nextWanderAt: 0,
+    fuse: 0,
+    chasing: false,
+  };
+
+  // Camera shake
+  const shake = { t: 0, amp: 0 };
+  const camShakeOffset = new BABYLON.Vector3(0, 0, 0);
+
+  function triggerShake(amplitude, duration) {
+    shake.amp = Math.max(shake.amp, amplitude);
+    shake.t = Math.max(shake.t, duration);
+  }
+
+  function explosionAt(pos, radius) {
+    const cx = Math.floor(pos.x);
+    const cy = Math.floor(pos.y);
+    const cz = Math.floor(pos.z);
+    const r2 = radius * radius;
+
+    const minX = cx - radius,
+      maxX = cx + radius;
+    const minY = cy - radius,
+      maxY = cy + radius;
+    const minZ = cz - radius,
+      maxZ = cz + radius;
+
+    for (let z = minZ; z <= maxZ; z++) {
+      for (let y = minY; y <= maxY; y++) {
+        for (let x = minX; x <= maxX; x++) {
+          const dx = x - cx,
+            dy = y - cy,
+            dz = z - cz;
+          if (dx * dx + dy * dy + dz * dz > r2) continue;
+          if (world.getBlock(x, y, z) !== BLOCK.AIR) world.setBlock(x, y, z, BLOCK.AIR);
+        }
       }
-      target = creeperTarget;
     }
 
-    const dirToTarget = target.subtract(creeper.position);
-    dirToTarget.y = 0;
-    const len = dirToTarget.length();
-    if (len > 0.01) {
-      const creeperSpeed = distToPlayer < 28 ? 6 : 3;
-      const step = dirToTarget.normalize().scale(creeperSpeed * dt);
+    // small shake
+    triggerShake(0.35, 0.25);
+  }
+
+  function respawnCreeper() {
+    // pick a random city spot on ground
+    for (let tries = 0; tries < 50; tries++) {
+      const seed = Math.random() * 99999;
+      const x = Math.floor((seed % 1) * 2 * CITY_HALF - CITY_HALF);
+      const z = Math.floor((((seed * 1.37) % 1) * 2 * CITY_HALF) - CITY_HALF);
+      const y = 2;
+
+      // avoid roads center a bit
+      if ((Math.abs(x) <= 4) || (Math.abs(z) <= 4)) continue;
+
+      creeper.position.set(x, y, z);
+      creeperState.fuse = 0;
+      creeperState.nextWanderAt = 0;
+      return;
+    }
+    creeper.position.set(10, 2, 10);
+  }
+
+  /** ---------------------------
+   *  Movement + Camera look (right joystick)
+   *  --------------------------- */
+  let camYaw = 180; // degrees (FollowCamera rotationOffset)
+  let camPitch = 4; // heightOffset baseline
+
+  function updateCameraLook(dt) {
+    const lookX = rightJoy.value.x;
+    const lookY = rightJoy.value.y;
+
+    // deadzone
+    const dz = 0.08;
+    const lx = Math.abs(lookX) < dz ? 0 : lookX;
+    const ly = Math.abs(lookY) < dz ? 0 : lookY;
+
+    // sensitivity tuned for iPad thumb
+    camYaw += lx * 140 * dt;
+    camPitch += -ly * 6.0 * dt;
+
+    // clamp pitch (heightOffset)
+    camPitch = Math.max(2.0, Math.min(7.5, camPitch));
+
+    camera.rotationOffset = camYaw;
+    camera.heightOffset = camPitch;
+  }
+
+  function cameraForwardXZ() {
+    // Convert yaw to forward vector (world)
+    const yawRad = (camYaw * Math.PI) / 180;
+    // FollowCamera rotationOffset is degrees around Y; forward is opposite of camera-to-target vector
+    // We'll define "forward" as facing where the camera looks (from player perspective).
+    const fx = -Math.sin(yawRad);
+    const fz = -Math.cos(yawRad);
+    const v = new BABYLON.Vector3(fx, 0, fz);
+    v.normalize();
+    return v;
+  }
+
+  function cameraRightXZ() {
+    const f = cameraForwardXZ();
+    const r = new BABYLON.Vector3(f.z, 0, -f.x);
+    r.normalize();
+    return r;
+  }
+
+  function updatePlayer(dt) {
+    // Determine grounded (simple: if vertical velocity ~0 and we collide down soon)
+    // We'll use a short ray down from player to check if close to ground.
+    const origin = player.position.add(new BABYLON.Vector3(0, 0.2, 0));
+    const down = new BABYLON.Ray(origin, new BABYLON.Vector3(0, -1, 0), 0.35);
+    const groundHit = scene.pickWithRay(down, (m) => m && m.metadata && m.metadata.isChunk && m.isEnabled());
+    const isGrounded = !!(groundHit && groundHit.hit);
+
+    move.grounded = isGrounded;
+    if (isGrounded) move.lastGroundedTime = nowSec();
+
+    // Wish direction from left joystick in camera space
+    const inX = leftJoy.value.x;
+    const inY = leftJoy.value.y;
+
+    const deadzone = 0.12;
+    const ax = Math.abs(inX) < deadzone ? 0 : inX;
+    const ay = Math.abs(inY) < deadzone ? 0 : inY;
+
+    const f = cameraForwardXZ();
+    const r = cameraRightXZ();
+
+    move.wish.copyFrom(f.scale(-ay)).addInPlace(r.scale(ax));
+    const wishLen = move.wish.length();
+    if (wishLen > 1e-3) move.wish.scaleInPlace(1 / Math.max(1, wishLen)); // normalize max 1
+
+    const speed = 5.2; // blocks/sec
+    const accel = 18.0;
+    const friction = 12.0;
+
+    // horizontal velocity
+    const hv = new BABYLON.Vector3(move.vel.x, 0, move.vel.z);
+
+    if (wishLen < 1e-3) {
+      // friction
+      const drop = friction * dt;
+      const newLen = Math.max(0, hv.length() - drop);
+      if (hv.length() > 1e-3) hv.scaleInPlace(newLen / hv.length());
+    } else {
+      // accelerate toward wish
+      const desired = move.wish.scale(speed);
+      const delta = desired.subtract(hv);
+      const maxStep = accel * dt;
+      const dlen = delta.length();
+      if (dlen > maxStep) delta.scaleInPlace(maxStep / dlen);
+      hv.addInPlace(delta);
+    }
+
+    move.vel.x = hv.x;
+    move.vel.z = hv.z;
+
+    // gravity
+    const grav = -18.5;
+    move.vel.y += grav * dt;
+
+    // jump (with small coyote time)
+    const coyote = 0.12;
+    if (move.jumpRequested) {
+      move.jumpRequested = false;
+      if (move.grounded || nowSec() - move.lastGroundedTime <= coyote) {
+        move.vel.y = 7.2;
+      }
+    }
+
+    // Move with collisions
+    const disp = move.vel.scale(dt);
+    player.moveWithCollisions(disp);
+
+    // If we hit ground, damp vertical velocity
+    if (move.grounded && move.vel.y < 0) move.vel.y = -0.5;
+  }
+
+  /** ---------------------------
+   *  Creeper AI update
+   *  --------------------------- */
+  function updateCreeper(dt) {
+    const playerPos = player.position;
+    const cPos = creeper.position;
+
+    const toPlayer = playerPos.subtract(cPos);
+    const dist = Math.sqrt(toPlayer.x * toPlayer.x + toPlayer.z * toPlayer.z); // XZ distance
+
+    const chaseRange = 14;
+    const explodeRange = 2.1;
+    const speedWander = 1.6;
+    const speedChase = 2.6;
+
+    const t = nowSec();
+    creeperState.chasing = dist < chaseRange;
+
+    if (!creeperState.chasing) {
+      // wander
+      if (t >= creeperState.nextWanderAt) {
+        creeperState.nextWanderAt = t + 1.0 + Math.random() * 1.2;
+        const ang = Math.random() * Math.PI * 2;
+        creeperState.dir.set(Math.cos(ang), 0, Math.sin(ang));
+      }
+      const step = creeperState.dir.scale(speedWander * dt);
       creeper.moveWithCollisions(step);
+      creeperState.fuse = 0;
+    } else {
+      // chase
+      const dir = new BABYLON.Vector3(toPlayer.x, 0, toPlayer.z);
+      const len = dir.length();
+      if (len > 1e-3) dir.scaleInPlace(1 / len);
+
+      const step = dir.scale(speedChase * dt);
+      creeper.moveWithCollisions(step);
+
+      // fuse/explosion
+      if (dist < explodeRange) {
+        creeperState.fuse += dt;
+        // visual "about to explode" cue
+        const pulse = 0.5 + 0.5 * Math.sin(creeperState.fuse * 18);
+        creeper.scaling.setAll(1 + pulse * 0.08);
+
+        if (creeperState.fuse >= 1.25) {
+          // explode: remove voxels within radius
+          const boomPos = creeper.position.clone();
+          explosionAt(boomPos, 4);
+
+          // reset creeper
+          creeper.scaling.setAll(1);
+          respawnCreeper();
+        }
+      } else {
+        creeperState.fuse = Math.max(0, creeperState.fuse - dt * 0.8);
+        creeper.scaling.setAll(1);
+      }
     }
 
-    if (distToPlayer < 3.0 && explodeCooldown <= 0) {
-      explodeCooldown = 3.0;
-      explodeAt(creeper.position.clone());
-      creeper.position.addInPlace(new BABYLON.Vector3(6, 0, 6));
+    // keep creeper near y=2-ish (soft)
+    if (creeper.position.y < 1.5) creeper.position.y = 2;
+    if (creeper.position.y > 6) creeper.position.y = 2;
+  }
+
+  /** ---------------------------
+   *  Per-frame chunk rebuild throttle + camera shake
+   *  --------------------------- */
+  function applyCameraShake(dt) {
+    if (shake.t <= 0) {
+      camShakeOffset.set(0, 0, 0);
+      return;
+    }
+    shake.t -= dt;
+    const a = shake.amp * (shake.t / Math.max(1e-3, shake.t + dt)); // fade-ish
+
+    camShakeOffset.set(
+      (Math.random() * 2 - 1) * a,
+      (Math.random() * 2 - 1) * a,
+      (Math.random() * 2 - 1) * a
+    );
+
+    // FollowCamera updates its position internally; apply a small additive offset after update.
+    camera.position.addInPlace(camShakeOffset);
+
+    if (shake.t <= 0) {
+      shake.amp = 0;
+      camShakeOffset.set(0, 0, 0);
+    }
+  }
+
+  /** ---------------------------
+   *  Main loop
+   *  --------------------------- */
+  let lastT = performance.now();
+
+  // Break cooldown to avoid removing too many blocks per second by holding
+  let breakCooldown = 0;
+
+  scene.onBeforeRenderObservable.add(() => {
+    const t = performance.now();
+    const dt = Math.min(0.05, (t - lastT) / 1000);
+    lastT = t;
+
+    updateCameraLook(dt);
+    updatePlayer(dt);
+    updateCreeper(dt);
+
+    // Hold-to-break with cooldown
+    breakCooldown -= dt;
+    if (btnState.breakPressed && breakCooldown <= 0) {
+      const did = breakTargetVoxel();
+      if (did) breakCooldown = 0.12;
+      else breakCooldown = 0.06;
     }
 
-    statusEl.textContent = `Chunks: ${vox.chunks.size} | Dirty: ${vox.dirtyQueue.size} | Creeper: ${distToPlayer.toFixed(1)}`;
+    // Rebuild only when needed
+    if (world.dirtyQueue.length) world.rebuildSome(2);
+
+    applyCameraShake(dt);
+
+    // Status
+    statusEl.textContent = `Chunks: ${world.chunks.size} | Dirty: ${world.dirtyQueue.length} | Pos: ${player.position.x.toFixed(
+      1
+    )}, ${player.position.y.toFixed(1)}, ${player.position.z.toFixed(1)}`;
   });
 
-  // Prevent scrolling while interacting
-  document.body.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+  engine.runRenderLoop(() => scene.render());
 
-  statusEl.textContent = "Running";
-  return scene;
-}
+  window.addEventListener("resize", () => engine.resize());
 
-const scene = makeScene();
-engine.runRenderLoop(() => scene.render());
-window.addEventListener("resize", () => engine.resize());
+  // Extra iPad Safari: stop elastic scrolling if any touch slips outside UI
+  document.addEventListener(
+    "touchmove",
+    (e) => {
+      e.preventDefault();
+    },
+    { passive: false }
+  );
+
+  // Optional: expose a quick debug helper
+  window.__blockCity = { scene, world, player, creeper };
+})();

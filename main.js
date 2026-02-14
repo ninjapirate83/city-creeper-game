@@ -842,6 +842,11 @@
     const cz = Math.floor(pos.z);
     const r2 = radius * radius;
 
+    // Keep a small support pad under the player so creeper explosions never drop us.
+    const supportY = Math.floor(player.position.y - 0.9);
+    const supportX = Math.floor(player.position.x);
+    const supportZ = Math.floor(player.position.z);
+
     const minX = cx - radius,
       maxX = cx + radius;
     const minY = cy - radius,
@@ -856,10 +861,28 @@
             dy = y - cy,
             dz = z - cz;
           if (dx * dx + dy * dy + dz * dz > r2) continue;
+
+          // Preserve a 3x3 footing area directly beneath the player.
+          const inPlayerPad =
+            y === supportY && Math.abs(x - supportX) <= 1 && Math.abs(z - supportZ) <= 1;
+          if (inPlayerPad) continue;
+
           if (world.getBlock(x, y, z) !== BLOCK.AIR) world.setBlock(x, y, z, BLOCK.AIR);
         }
       }
     }
+
+    // Reassert support pad in case the area was already damaged by earlier blasts.
+    for (let z = supportZ - 1; z <= supportZ + 1; z++) {
+      for (let x = supportX - 1; x <= supportX + 1; x++) {
+        world.setBlock(x, supportY, z, BLOCK.ROAD);
+      }
+    }
+
+    // Keep vertical momentum from carrying us downward right after the blast.
+    if (move.vel.y < 0) move.vel.y = 0;
+    move.grounded = true;
+    move.lastGroundedTime = nowSec();
 
     // small shake
     triggerShake(0.35, 0.25);

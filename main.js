@@ -72,6 +72,10 @@
       return d;
     })();
 
+  // Hide legacy static HUD controls from index.html to avoid touch overlap with virtual controls.
+  const legacyHud = document.querySelector(".hud");
+  if (legacyHud) legacyHud.style.display = "none";
+
   function makeButton(id, label, rightPx, bottomPx) {
     let b = document.getElementById(id);
     if (b) return b;
@@ -171,13 +175,22 @@
     return wrap;
   }
 
-  const BUILD_VERSION = "v10";
+  const BUILD_VERSION = "v11";
 
   const statusEl = makeStatus();
   const buildVersionEl = document.getElementById("buildVersion");
   if (buildVersionEl) buildVersionEl.textContent = `Build ${BUILD_VERSION}`;
-  const breakBtn = makeButton("breakBtn", "Break", 16, 16 + 86 + 12);
-  const jumpBtn = makeButton("jumpBtn", "Jump", 16, 16);
+
+  // Keep action buttons above the right joystick so controls never overlap.
+  const JOY_BOTTOM = 16;
+  const JOY_SIZE = 160;
+  const BTN_SIZE = 86;
+  const BTN_GAP = 12;
+  const jumpBtnBottom = JOY_BOTTOM + JOY_SIZE + BTN_GAP;
+  const breakBtnBottom = jumpBtnBottom + BTN_SIZE + BTN_GAP;
+
+  const breakBtn = makeButton("breakBtn", "Break", 16, breakBtnBottom);
+  const jumpBtn = makeButton("jumpBtn", "Jump", 16, jumpBtnBottom);
 
   const leftJoyWrap = makeJoystick("left", "left");
   const rightJoyWrap = makeJoystick("right", "right");

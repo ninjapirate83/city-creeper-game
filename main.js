@@ -5,6 +5,18 @@ const statusEl = document.getElementById("status");
 const breakBtn = document.getElementById("breakBtn");
 const jumpBtn = document.getElementById("jumpBtn");
 
+// Prevent iOS double-tap zoom (especially on buttons)
+let lastTouchEnd = 0;
+document.addEventListener(
+  "touchend",
+  (e) => {
+    const now = Date.now();
+    if (now - lastTouchEnd <= 300) e.preventDefault();
+    lastTouchEnd = now;
+  },
+  { passive: false }
+);
+
 /** ---------------------------
  *  Voxel + Chunk System
  *  --------------------------- */
@@ -39,7 +51,6 @@ class Chunk {
     this.cz = cz;
     this.blocks = new Uint8Array(CHUNK_VOL); // all AIR
     this.mesh = null;
-    this.dirty = true;
   }
   get(lx, ly, lz) {
     if (lx < 0 || ly < 0 || lz < 0 || lx >= CHUNK_SIZE || ly >= CHUNK_SIZE || lz >= CHUNK_SIZE) return BLOCK.AIR;
@@ -48,7 +59,6 @@ class Chunk {
   set(lx, ly, lz, v) {
     if (lx < 0 || ly < 0 || lz < 0 || lx >= CHUNK_SIZE || ly >= CHUNK_SIZE || lz >= CHUNK_SIZE) return;
     this.blocks[idx(lx, ly, lz)] = v;
-    this.dirty = true;
   }
   origin() {
     return new BABYLON.Vector3(this.cx * CHUNK_SIZE, this.cy * CHUNK_SIZE, this.cz * CHUNK_SIZE);
@@ -61,7 +71,6 @@ class VoxelWorld {
     this.chunks = new Map();
     this.dirtyQueue = new Set(); // chunk keys
 
-    // Simple materials (per chunk mesh is one material; we tint by vertex color)
     this.mat = new BABYLON.StandardMaterial("chunkMat", scene);
     this.mat.specularColor = new BABYLON.Color3(0.1, 0.1, 0.1);
     this.mat.backFaceCulling = true;
@@ -102,7 +111,7 @@ class VoxelWorld {
     c.set(lx, ly, lz, v);
     this.markDirty(cx, cy, cz);
 
-    // If on boundary, neighbors become dirty too
+    // Boundary neighbors dirty
     if (lx === 0) this.markDirty(cx - 1, cy, cz);
     if (lx === CHUNK_SIZE - 1) this.markDirty(cx + 1, cy, cz);
     if (ly === 0) this.markDirty(cx, cy - 1, cz);
@@ -116,15 +125,11 @@ class VoxelWorld {
     if (this.chunks.has(key)) this.dirtyQueue.add(key);
   }
 
-  // Build a limited number per frame to keep iPad smooth
   rebuildSome(maxPerFrame = 2) {
     let built = 0;
     for (const key of this.dirtyQueue) {
       const c = this.chunks.get(key);
-      if (c) {
-        this.buildChunkMesh(c);
-        c.dirty = false;
-      }
+      if (c) this.buildChunkMesh(c);
       this.dirtyQueue.delete(key);
       built++;
       if (built >= maxPerFrame) break;
@@ -141,11 +146,10 @@ class VoxelWorld {
     const normals = [];
     const indices = [];
     const uvs = [];
-    const colors = []; // RGBA per vertex
+    const colors = [];
 
     const origin = chunk.origin();
 
-    // Face definitions: normal + 4 corners
     const faces = [
       { n: [1, 0, 0],  v: [[1,0,0],[1,1,0],[1,1,1],[1,0,1]] }, // +X
       { n: [-1,0,0],  v: [[0,0,1],[0,1,1],[0,1,0],[0,0,0]] }, // -X
@@ -156,7 +160,6 @@ class VoxelWorld {
     ];
 
     function blockColor(bt) {
-      // Return [r,g,b,a]
       if (bt === BLOCK.ROAD) return [0.10, 0.10, 0.12, 1];
       if (bt === BLOCK.BUILDING) return [0.35, 0.38, 0.42, 1];
       if (bt === BLOCK.CRATE) return [0.45, 0.30, 0.18, 1];
@@ -181,7 +184,6 @@ class VoxelWorld {
             const face = faces[f];
             const nx = face.n[0], ny = face.n[1], nz = face.n[2];
 
-            // Only emit if neighbor is AIR
             const nb = this.getBlock(wx + nx, wy + ny, wz + nz);
             if (nb !== BLOCK.AIR) continue;
 
@@ -189,7 +191,6 @@ class VoxelWorld {
               const cv = face.v[i];
               positions.push(wx + cv[0], wy + cv[1], wz + cv[2]);
               normals.push(nx, ny, nz);
-              // simple UVs (not used much yet)
               uvs.push(i === 0 || i === 3 ? 0 : 1, i < 2 ? 0 : 1);
               colors.push(col[0], col[1], col[2], col[3]);
             }
@@ -237,42 +238,30 @@ function makeScene() {
   dir.position = new BABYLON.Vector3(40, 80, -40);
   dir.intensity = 0.6;
 
-  // Invisible ground collider (so you can’t fall forever)
+  // Invisible ground collider
   const ground = BABYLON.MeshBuilder.CreateGround("ground", { width: 260, height: 260 }, scene);
   ground.isVisible = false;
   ground.checkCollisions = true;
 
-  // Player (invisible collider capsule)
+  // Player collider
   const player = BABYLON.MeshBuilder.CreateCapsule("player", { height: 2.0, radius: 0.45 }, scene);
   player.isVisible = false;
   player.position = new BABYLON.Vector3(0, 3, 0);
   player.checkCollisions = true;
 
-  // Camera (third-person follow)
-const camera = new BABYLON.FollowCamera("cam", new BABYLON.Vector3(0, 6, -10), scene, player);
-camera.radius = 10;
-camera.heightOffset = 3.2;
-camera.rotationOffset = 180;
-camera.cameraAcceleration = 0.05;
-camera.maxCameraSpeed = 10;
-  camera.rotationOffset = 180;   // behind player
-camera.upperRotationLimit = BABYLON.Tools.ToRadians(55);
-camera.lowerRotationLimit = BABYLON.Tools.ToRadians(5);  // keep it above horizon
-camera.lowerRadiusLimit = 8;
-camera.upperRadiusLimit = 12;
+  // Camera (disable touch controls by NOT attaching to canvas)
+  const camera = new BABYLON.FollowCamera("cam", new BABYLON.Vector3(0, 6, -10), scene, player);
+  camera.radius = 10;
+  camera.heightOffset = 3.2;
+  camera.rotationOffset = 180;
+  camera.cameraAcceleration = 0.05;
+  camera.maxCameraSpeed = 10;
 
-
-// Prevent camera going "underground":
-// FollowCamera uses rotation around the target.
-// rotationX is the vertical angle. 0 = level, positive = looking down.
-// Clamp it so you can’t pitch too far down/up.
-camera.lowerRotationLimit = BABYLON.Tools.ToRadians(-10); // slightly above horizon
-camera.upperRotationLimit = BABYLON.Tools.ToRadians(65);  // looking down, but not enough to go underground
-
-// Optional: keep camera from zooming too close/far
-camera.lowerRadiusLimit = 6;
-camera.upperRadiusLimit = 18;
-
+  // Keep camera above horizon / stable
+  camera.lowerRotationLimit = BABYLON.Tools.ToRadians(5);
+  camera.upperRotationLimit = BABYLON.Tools.ToRadians(55);
+  camera.lowerRadiusLimit = 8;
+  camera.upperRadiusLimit = 12;
 
   // Gravity + collisions
   scene.collisionsEnabled = true;
@@ -286,20 +275,19 @@ camera.upperRadiusLimit = 18;
   function fillBox(x0, y0, z0, x1, y1, z1, type) {
     for (let z = z0; z < z1; z++) {
       for (let y = y0; y < y1; y++) {
-        for (let x = x0; x < x1; x++) {
-          vox.setBlock(x, y, z, type);
-        }
+        for (let x = x0; x < x1; x++) vox.setBlock(x, y, z, type);
       }
     }
   }
 
-  // Build city voxels (roads + buildings)
+  // Roads
   for (let z = -120; z < 120; z++) {
     for (let x = -120; x < 120; x++) {
       vox.setBlock(x, 0, z, BLOCK.ROAD);
     }
   }
 
+  // Buildings
   const spacing = 18;
   const half = 4;
   for (let ix = -half; ix <= half; ix++) {
@@ -317,17 +305,19 @@ camera.upperRadiusLimit = 18;
     }
   }
 
-  // Crates as voxels
+  // Crates
   for (let i = 0; i < 50; i++) {
     const x = Math.floor((Math.random() - 0.5) * 180);
     const z = Math.floor((Math.random() - 0.5) * 180);
     vox.setBlock(x, 1, z, BLOCK.CRATE);
   }
 
-  // Initial build (do more the first time)
-  for (let i = 0; i < 200; i++) vox.rebuildSome(8);
+  // Build ALL initial chunks now (one-time) so joystick is smooth
+  while (vox.dirtyQueue.size > 0) {
+    vox.rebuildSome(50);
+  }
 
-  // Creeper-like enemy (only monster) - still a normal mesh for now
+  // Creeper mesh
   const creeper = BABYLON.MeshBuilder.CreateBox("creeper", { size: 1.6 }, scene);
   creeper.position = new BABYLON.Vector3(20, 1.0, 20);
   creeper.checkCollisions = true;
@@ -336,21 +326,17 @@ camera.upperRadiusLimit = 18;
   cmat.diffuseColor = new BABYLON.Color3(0.10, 0.70, 0.25);
   creeper.material = cmat;
 
-  // Simple AI: wander, then chase when close
+  // Creeper AI
   let creeperTarget = new BABYLON.Vector3(0, 0, 0);
   let nextWanderAt = 0;
   let explodeCooldown = 0;
 
   function pickWanderTarget() {
-    creeperTarget = new BABYLON.Vector3(
-      (Math.random() - 0.5) * 160,
-      0,
-      (Math.random() - 0.5) * 160
-    );
+    creeperTarget = new BABYLON.Vector3((Math.random() - 0.5) * 160, 0, (Math.random() - 0.5) * 160);
   }
   pickWanderTarget();
 
-  // Touch joystick input
+  // Touch joystick input (improved for iPad)
   const pad = document.getElementById("pad");
   const stick = document.getElementById("stick");
 
@@ -374,26 +360,40 @@ camera.upperRadiusLimit = 18;
     const sy = dy * clamp;
 
     stick.style.left = `${35 + sx}px`;
-    stick.style.top  = `${35 + sy}px`;
+    stick.style.top = `${35 + sy}px`;
 
     moveX = sx / max;
     moveZ = sy / max;
   }
 
-  pad.addEventListener("pointerdown", (e) => {
-    touching = true;
-    updatePadGeometry();
-    setStick(e.clientX - padCenter.x, e.clientY - padCenter.y);
-  });
-  pad.addEventListener("pointermove", (e) => {
-    if (!touching) return;
-    setStick(e.clientX - padCenter.x, e.clientY - padCenter.y);
-  });
+  pad.addEventListener(
+    "pointerdown",
+    (e) => {
+      e.preventDefault();
+      pad.setPointerCapture(e.pointerId);
+      touching = true;
+      updatePadGeometry();
+      setStick(e.clientX - padCenter.x, e.clientY - padCenter.y);
+    },
+    { passive: false }
+  );
+
+  pad.addEventListener(
+    "pointermove",
+    (e) => {
+      if (!touching) return;
+      e.preventDefault();
+      setStick(e.clientX - padCenter.x, e.clientY - padCenter.y);
+    },
+    { passive: false }
+  );
+
   function endPad() {
     touching = false;
     stick.style.left = `35px`;
-    stick.style.top  = `35px`;
-    moveX = 0; moveZ = 0;
+    stick.style.top = `35px`;
+    moveX = 0;
+    moveZ = 0;
   }
   pad.addEventListener("pointerup", endPad);
   pad.addEventListener("pointercancel", endPad);
@@ -402,17 +402,19 @@ camera.upperRadiusLimit = 18;
   let yVelocity = 0;
   let onGround = false;
 
-  function tryJump() {
+  function tryJump(e) {
+    if (e && e.preventDefault) e.preventDefault();
     if (onGround) yVelocity = 0.22;
   }
   jumpBtn.addEventListener("click", tryJump);
+  jumpBtn.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
 
-  // Break voxel (raycast, then convert to voxel coords)
-  function tryBreak() {
+  // Break voxel
+  function tryBreak(e) {
+    if (e && e.preventDefault) e.preventDefault();
+
     const pick = scene.pick(engine.getRenderWidth() / 2, engine.getRenderHeight() / 2);
     if (!pick || !pick.hit || !pick.pickedPoint) return;
-
-    // Only allow breaking chunk meshes (starts with "chunk_")
     if (!pick.pickedMesh || typeof pick.pickedMesh.name !== "string" || !pick.pickedMesh.name.startsWith("chunk_")) return;
 
     const n = pick.getNormal(true);
@@ -420,16 +422,17 @@ camera.upperRadiusLimit = 18;
 
     const p = pick.pickedPoint;
     const eps = 0.01;
+
     const wx = Math.floor(p.x - n.x * eps);
     const wy = Math.floor(p.y - n.y * eps);
     const wz = Math.floor(p.z - n.z * eps);
 
-    const bt = vox.getBlock(wx, wy, wz);
-    if (bt !== BLOCK.AIR) {
+    if (vox.getBlock(wx, wy, wz) !== BLOCK.AIR) {
       vox.setBlock(wx, wy, wz, BLOCK.AIR);
     }
   }
   breakBtn.addEventListener("click", tryBreak);
+  breakBtn.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
 
   // Explosion: delete voxels around point, shake camera
   function explodeAt(pos) {
@@ -449,7 +452,7 @@ camera.upperRadiusLimit = 18;
           const dx = (x + 0.5) - pos.x;
           const dy = (y + 0.5) - pos.y;
           const dz = (z + 0.5) - pos.z;
-          if (dx*dx + dy*dy + dz*dz <= r2) {
+          if (dx * dx + dy * dy + dz * dz <= r2) {
             if (vox.getBlock(x, y, z) !== BLOCK.AIR) vox.setBlock(x, y, z, BLOCK.AIR);
           }
         }
@@ -465,19 +468,18 @@ camera.upperRadiusLimit = 18;
   scene.onBeforeRenderObservable.add(() => {
     const dt = engine.getDeltaTime() / 1000;
 
-    // Rebuild a couple chunk meshes per frame (smooth on iPad)
-    vox.rebuildSome(2);
+    // Only rebuild during gameplay when there are edits/explosions
+    if (vox.dirtyQueue.size > 0) vox.rebuildSome(2);
 
-    // Player movement relative to camera forward/right on XZ plane
+    // Player movement relative to camera forward/right on XZ
     const forward = camera.getForwardRay().direction;
     const f = new BABYLON.Vector3(forward.x, 0, forward.z).normalize();
     const r = new BABYLON.Vector3(f.z, 0, -f.x).normalize();
 
-    const speed = 10; // units/sec
+    const speed = 10;
     const desired = r.scale(moveX).add(f.scale(moveZ));
     const move = desired.scale(speed * dt);
 
-    // gravity + basic jump
     yVelocity += scene.gravity.y * dt;
     const vertical = new BABYLON.Vector3(0, yVelocity, 0);
 
@@ -489,7 +491,6 @@ camera.upperRadiusLimit = 18;
       player.position.y = Math.max(player.position.y, 2);
     }
 
-    // Creeper behavior
     const distToPlayer = BABYLON.Vector3.Distance(creeper.position, player.position);
     explodeCooldown = Math.max(0, explodeCooldown - dt);
 
@@ -513,16 +514,16 @@ camera.upperRadiusLimit = 18;
       creeper.moveWithCollisions(step);
     }
 
-    // Explosion when close (player cannot die)
     if (distToPlayer < 3.0 && explodeCooldown <= 0) {
       explodeCooldown = 3.0;
       explodeAt(creeper.position.clone());
       creeper.position.addInPlace(new BABYLON.Vector3(6, 0, 6));
     }
 
-    statusEl.textContent = `Chunks: ${vox.chunks.size} | Creeper dist: ${distToPlayer.toFixed(1)}`;
+    statusEl.textContent = `Chunks: ${vox.chunks.size} | Dirty: ${vox.dirtyQueue.size} | Creeper: ${distToPlayer.toFixed(1)}`;
   });
 
+  // Prevent scrolling while interacting
   document.body.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
 
   statusEl.textContent = "Running";

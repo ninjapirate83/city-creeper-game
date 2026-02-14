@@ -72,6 +72,10 @@
       return d;
     })();
 
+  // Hide legacy static HUD controls from index.html to avoid touch overlap with virtual controls.
+  const legacyHud = document.querySelector(".hud");
+  if (legacyHud) legacyHud.style.display = "none";
+
   function makeButton(id, label, rightPx, bottomPx) {
     let b = document.getElementById(id);
     if (b) return b;
@@ -171,9 +175,22 @@
     return wrap;
   }
 
+  const BUILD_VERSION = "v13";
+
   const statusEl = makeStatus();
-  const breakBtn = makeButton("breakBtn", "Break", 16, 16 + 86 + 12);
-  const jumpBtn = makeButton("jumpBtn", "Jump", 16, 16);
+  const buildVersionEl = document.getElementById("buildVersion");
+  if (buildVersionEl) buildVersionEl.textContent = `Build ${BUILD_VERSION}`;
+
+  // Keep action buttons above the right joystick so controls never overlap.
+  const JOY_BOTTOM = 16;
+  const JOY_SIZE = 160;
+  const BTN_SIZE = 86;
+  const BTN_GAP = 12;
+  const jumpBtnBottom = JOY_BOTTOM + JOY_SIZE + BTN_GAP;
+  const breakBtnBottom = jumpBtnBottom + BTN_SIZE + BTN_GAP;
+
+  const breakBtn = makeButton("breakBtn", "Break", 16, breakBtnBottom);
+  const jumpBtn = makeButton("jumpBtn", "Jump", 16, jumpBtnBottom);
 
   const leftJoyWrap = makeJoystick("left", "left");
   const rightJoyWrap = makeJoystick("right", "right");
@@ -187,6 +204,7 @@
       this.knobEl = wrapEl.querySelector("div:last-child"); // knob
       this.active = false;
       this.pointerId = null;
+      this.touchId = null;
       this.center = { x: 0, y: 0 };
       this.value = { x: 0, y: 0 };
       this.radius = 58; // pixels from center
@@ -208,20 +226,22 @@
         this.knobEl.style.transform = `translate(${px}px, ${py}px)`;
       };
 
-      const onDown = (e) => {
-        e.preventDefault();
+      const onDown = (pointerId, clientX, clientY, e) => {
+        if (e) e.preventDefault();
         this.active = true;
-        this.pointerId = e.pointerId;
+        this.pointerId = pointerId;
         this.center = getRectCenter();
-        el.setPointerCapture(this.pointerId);
-        onMove(e);
+        if (typeof pointerId === "number" && el.setPointerCapture) {
+          el.setPointerCapture(pointerId);
+        }
+        onMove(pointerId, clientX, clientY, e);
       };
 
-      const onMove = (e) => {
-        if (!this.active || e.pointerId !== this.pointerId) return;
-        e.preventDefault();
-        const dx = e.clientX - this.center.x;
-        const dy = e.clientY - this.center.y;
+      const onMove = (pointerId, clientX, clientY, e) => {
+        if (!this.active || pointerId !== this.pointerId) return;
+        if (e) e.preventDefault();
+        const dx = clientX - this.center.x;
+        const dy = clientY - this.center.y;
         const len = Math.hypot(dx, dy);
         const max = this.radius;
         const cl = len > max ? max / len : 1;
@@ -234,20 +254,80 @@
         setKnob(nx, ny);
       };
 
-      const onUp = (e) => {
-        if (!this.active || e.pointerId !== this.pointerId) return;
-        e.preventDefault();
+      const onUp = (pointerId, e) => {
+        if (!this.active || pointerId !== this.pointerId) return;
+        if (e) e.preventDefault();
         this.active = false;
         this.pointerId = null;
+        this.touchId = null;
         this.value.x = 0;
         this.value.y = 0;
         this.knobEl.style.transform = `translate(0px, 0px)`;
       };
 
-      el.addEventListener("pointerdown", onDown, { passive: false });
-      el.addEventListener("pointermove", onMove, { passive: false });
-      el.addEventListener("pointerup", onUp, { passive: false });
-      el.addEventListener("pointercancel", onUp, { passive: false });
+      el.addEventListener(
+        "pointerdown",
+        (e) => {
+          onDown(e.pointerId, e.clientX, e.clientY, e);
+        },
+        { passive: false }
+      );
+      el.addEventListener(
+        "pointermove",
+        (e) => {
+          onMove(e.pointerId, e.clientX, e.clientY, e);
+        },
+        { passive: false }
+      );
+      el.addEventListener(
+        "pointerup",
+        (e) => {
+          onUp(e.pointerId, e);
+        },
+        { passive: false }
+      );
+      el.addEventListener(
+        "pointercancel",
+        (e) => {
+          onUp(e.pointerId, e);
+        },
+        { passive: false }
+      );
+
+      // Touch fallback for browsers where pointer events are inconsistent.
+      el.addEventListener(
+        "touchstart",
+        (e) => {
+          if (this.active || e.changedTouches.length === 0) return;
+          const t = e.changedTouches[0];
+          this.touchId = t.identifier;
+          onDown(`touch-${t.identifier}`, t.clientX, t.clientY, e);
+        },
+        { passive: false }
+      );
+      const onTrackedTouchMove = (e) => {
+        if (!this.active || this.touchId === null) return;
+        for (const t of e.changedTouches) {
+          if (t.identifier !== this.touchId) continue;
+          onMove(`touch-${t.identifier}`, t.clientX, t.clientY, e);
+          break;
+        }
+      };
+
+      const onTrackedTouchEnd = (e) => {
+        if (!this.active || this.touchId === null) return;
+        for (const t of e.changedTouches) {
+          if (t.identifier !== this.touchId) continue;
+          onUp(`touch-${t.identifier}`, e);
+          break;
+        }
+      };
+
+      // Use window-level listeners so dragging outside joystick bounds still moves/releases correctly.
+      window.addEventListener("touchmove", onTrackedTouchMove, { passive: false });
+      window.addEventListener("touchend", onTrackedTouchEnd, { passive: false });
+      window.addEventListener("touchcancel", onTrackedTouchEnd, { passive: false });
+
       el.addEventListener("contextmenu", (e) => e.preventDefault());
     }
   }
@@ -730,14 +810,63 @@
   /** ---------------------------
    *  Creeper-like enemy
    *  --------------------------- */
-  const creeper = BABYLON.MeshBuilder.CreateBox("creeper", { size: 1.0 }, scene);
+  // Invisible collider for movement/collisions + separate blocky visuals.
+  const creeper = BABYLON.MeshBuilder.CreateBox("creeper", { width: 0.85, height: 2.0, depth: 0.85 }, scene);
   creeper.position.set(8, 2, 8);
   creeper.checkCollisions = true;
   creeper.isPickable = false;
+  creeper.visibility = 0;
+
+  const creeperVisualRoot = new BABYLON.TransformNode("creeperVisualRoot", scene);
+  creeperVisualRoot.parent = creeper;
+
   const creeperMat = new BABYLON.StandardMaterial("creeperMat", scene);
   creeperMat.diffuseColor = new BABYLON.Color3(0.2, 0.75, 0.25);
   creeperMat.specularColor = new BABYLON.Color3(0.05, 0.05, 0.05);
-  creeper.material = creeperMat;
+
+  const creeperDarkMat = new BABYLON.StandardMaterial("creeperDarkMat", scene);
+  creeperDarkMat.diffuseColor = new BABYLON.Color3(0.06, 0.12, 0.06);
+  creeperDarkMat.specularColor = new BABYLON.Color3(0, 0, 0);
+
+  const torso = BABYLON.MeshBuilder.CreateBox("creeperTorso", { width: 0.78, height: 1.2, depth: 0.62 }, scene);
+  torso.parent = creeperVisualRoot;
+  torso.position.set(0, 0.2, 0);
+  torso.material = creeperMat;
+  torso.isPickable = false;
+
+  const head = BABYLON.MeshBuilder.CreateBox("creeperHead", { size: 0.82 }, scene);
+  head.parent = creeperVisualRoot;
+  head.position.set(0, 1.2, 0);
+  head.material = creeperMat;
+  head.isPickable = false;
+
+  const footL = BABYLON.MeshBuilder.CreateBox("creeperFootL", { width: 0.32, height: 0.75, depth: 0.32 }, scene);
+  footL.parent = creeperVisualRoot;
+  footL.position.set(-0.2, -0.75, 0);
+  footL.material = creeperMat;
+  footL.isPickable = false;
+
+  const footR = BABYLON.MeshBuilder.CreateBox("creeperFootR", { width: 0.32, height: 0.75, depth: 0.32 }, scene);
+  footR.parent = creeperVisualRoot;
+  footR.position.set(0.2, -0.75, 0);
+  footR.material = creeperMat;
+  footR.isPickable = false;
+
+  // Blocky frowny face on the front of the head.
+  const faceParts = [
+    [-0.16, 1.32, 0.43, 0.12, 0.12, 0.04],
+    [0.16, 1.32, 0.43, 0.12, 0.12, 0.04],
+    [0.0, 1.05, 0.43, 0.14, 0.16, 0.04],
+    [-0.1, 0.96, 0.43, 0.12, 0.08, 0.04],
+    [0.1, 0.96, 0.43, 0.12, 0.08, 0.04],
+  ];
+  for (const [x, y, z, w, h, d] of faceParts) {
+    const part = BABYLON.MeshBuilder.CreateBox("creeperFacePart", { width: w, height: h, depth: d }, scene);
+    part.parent = creeperVisualRoot;
+    part.position.set(x, y, z);
+    part.material = creeperDarkMat;
+    part.isPickable = false;
+  }
 
   const creeperState = {
     dir: new BABYLON.Vector3(1, 0, 0),
@@ -761,6 +890,11 @@
     const cz = Math.floor(pos.z);
     const r2 = radius * radius;
 
+    // Keep a small support pad under the player so creeper explosions never drop us.
+    const supportY = Math.floor(player.position.y - 0.9);
+    const supportX = Math.floor(player.position.x);
+    const supportZ = Math.floor(player.position.z);
+
     const minX = cx - radius,
       maxX = cx + radius;
     const minY = cy - radius,
@@ -775,10 +909,28 @@
             dy = y - cy,
             dz = z - cz;
           if (dx * dx + dy * dy + dz * dz > r2) continue;
+
+          // Preserve a 3x3 footing area directly beneath the player.
+          const inPlayerPad =
+            y === supportY && Math.abs(x - supportX) <= 1 && Math.abs(z - supportZ) <= 1;
+          if (inPlayerPad) continue;
+
           if (world.getBlock(x, y, z) !== BLOCK.AIR) world.setBlock(x, y, z, BLOCK.AIR);
         }
       }
     }
+
+    // Reassert support pad in case the area was already damaged by earlier blasts.
+    for (let z = supportZ - 1; z <= supportZ + 1; z++) {
+      for (let x = supportX - 1; x <= supportX + 1; x++) {
+        world.setBlock(x, supportY, z, BLOCK.ROAD);
+      }
+    }
+
+    // Keep vertical momentum from carrying us downward right after the blast.
+    if (move.vel.y < 0) move.vel.y = 0;
+    move.grounded = true;
+    move.lastGroundedTime = nowSec();
 
     // small shake
     triggerShake(0.35, 0.25);
@@ -947,6 +1099,9 @@
       }
       const step = creeperState.dir.scale(speedWander * dt);
       creeper.moveWithCollisions(step);
+      if (creeperState.dir.lengthSquared() > 1e-4) {
+        creeperVisualRoot.rotation.y = Math.atan2(creeperState.dir.x, creeperState.dir.z);
+      }
       creeperState.fuse = 0;
     } else {
       // chase
@@ -956,13 +1111,14 @@
 
       const step = dir.scale(speedChase * dt);
       creeper.moveWithCollisions(step);
+      if (len > 1e-3) creeperVisualRoot.rotation.y = Math.atan2(dir.x, dir.z);
 
       // fuse/explosion
       if (dist < explodeRange) {
         creeperState.fuse += dt;
         // visual "about to explode" cue
         const pulse = 0.5 + 0.5 * Math.sin(creeperState.fuse * 18);
-        creeper.scaling.setAll(1 + pulse * 0.08);
+        creeperVisualRoot.scaling.setAll(1 + pulse * 0.08);
 
         if (creeperState.fuse >= 1.25) {
           // explode: remove voxels within radius
@@ -970,12 +1126,12 @@
           explosionAt(boomPos, 4);
 
           // reset creeper
-          creeper.scaling.setAll(1);
+          creeperVisualRoot.scaling.setAll(1);
           respawnCreeper();
         }
       } else {
         creeperState.fuse = Math.max(0, creeperState.fuse - dt * 0.8);
-        creeper.scaling.setAll(1);
+        creeperVisualRoot.scaling.setAll(1);
       }
     }
 

@@ -171,7 +171,7 @@
     return wrap;
   }
 
-  const BUILD_VERSION = "v9";
+  const BUILD_VERSION = "v10";
 
   const statusEl = makeStatus();
   const buildVersionEl = document.getElementById("buildVersion");

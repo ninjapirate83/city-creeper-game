@@ -2,9 +2,40 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Test</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>City Creeper Prototype</title>
+  <style>
+    html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#111; }
+    #renderCanvas { width:100%; height:100%; touch-action:none; display:block; }
+    .hud { position:fixed; left:0; right:0; bottom:0; padding:12px; display:flex; justify-content:space-between; pointer-events:none; }
+    .pad { width:140px; height:140px; border-radius:20px; background:rgba(255,255,255,0.08); pointer-events:auto; touch-action:none; position:relative; }
+    .stick { width:70px; height:70px; border-radius:18px; background:rgba(255,255,255,0.18); position:absolute; left:35px; top:35px; }
+    .btns { display:flex; gap:12px; pointer-events:auto; }
+    button { font-size:16px; padding:14px 16px; border-radius:14px; border:0; background:rgba(255,255,255,0.15); color:#fff; }
+    button:active { background:rgba(255,255,255,0.25); }
+    .topbar { position:fixed; left:0; right:0; top:0; padding:10px 12px; color:#fff; font:14px system-ui; display:flex; justify-content:space-between; gap:12px; }
+    .chip { padding:8px 10px; border-radius:999px; background:rgba(255,255,255,0.10); }
+  </style>
 </head>
 <body>
-  Game starting...
+  <div class="topbar">
+    <div class="chip">City Creeper Prototype</div>
+    <div class="chip" id="status">Loading…</div>
+  </div>
+
+  <canvas id="renderCanvas"></canvas>
+
+  <div class="hud">
+    <div class="pad" id="pad">
+      <div class="stick" id="stick"></div>
+    </div>
+    <div class="btns">
+      <button id="breakBtn">Break</button>
+      <button id="jumpBtn">Jump</button>
+    </div>
+  </div>
+
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <script src="main.js"></script>
 </body>
 </html>

@@ -249,13 +249,26 @@ function makeScene() {
   player.checkCollisions = true;
 
   // Camera (third-person follow)
-  const camera = new BABYLON.FollowCamera("cam", new BABYLON.Vector3(0, 6, -10), scene, player);
-  camera.radius = 10;
-  camera.heightOffset = 3.2;
-  camera.rotationOffset = 180;
-  camera.cameraAcceleration = 0.05;
-  camera.maxCameraSpeed = 10;
-  camera.attachControl(canvas, true);
+const camera = new BABYLON.FollowCamera("cam", new BABYLON.Vector3(0, 6, -10), scene, player);
+camera.radius = 10;
+camera.heightOffset = 3.2;
+camera.rotationOffset = 180;
+camera.cameraAcceleration = 0.05;
+camera.maxCameraSpeed = 10;
+
+// Prevent camera going "underground":
+// FollowCamera uses rotation around the target.
+// rotationX is the vertical angle. 0 = level, positive = looking down.
+// Clamp it so you can’t pitch too far down/up.
+camera.lowerRotationLimit = BABYLON.Tools.ToRadians(-10); // slightly above horizon
+camera.upperRotationLimit = BABYLON.Tools.ToRadians(65);  // looking down, but not enough to go underground
+
+// Optional: keep camera from zooming too close/far
+camera.lowerRadiusLimit = 6;
+camera.upperRadiusLimit = 18;
+
+camera.attachControl(canvas, true);
+
 
   // Gravity + collisions
   scene.collisionsEnabled = true;

@@ -255,6 +255,12 @@ camera.heightOffset = 3.2;
 camera.rotationOffset = 180;
 camera.cameraAcceleration = 0.05;
 camera.maxCameraSpeed = 10;
+  camera.rotationOffset = 180;   // behind player
+camera.upperRotationLimit = BABYLON.Tools.ToRadians(55);
+camera.lowerRotationLimit = BABYLON.Tools.ToRadians(5);  // keep it above horizon
+camera.lowerRadiusLimit = 8;
+camera.upperRadiusLimit = 12;
+
 
 // Prevent camera going "underground":
 // FollowCamera uses rotation around the target.
@@ -266,8 +272,6 @@ camera.upperRotationLimit = BABYLON.Tools.ToRadians(65);  // looking down, but n
 // Optional: keep camera from zooming too close/far
 camera.lowerRadiusLimit = 6;
 camera.upperRadiusLimit = 18;
-
-camera.attachControl(canvas, true);
 
 
   // Gravity + collisions

@@ -175,7 +175,7 @@
     return wrap;
   }
 
-  const BUILD_VERSION = "v12";
+  const BUILD_VERSION = "v13";
 
   const statusEl = makeStatus();
   const buildVersionEl = document.getElementById("buildVersion");
@@ -305,42 +305,28 @@
         },
         { passive: false }
       );
-      el.addEventListener(
-        "touchmove",
-        (e) => {
-          if (!this.active || this.touchId === null) return;
-          for (const t of e.changedTouches) {
-            if (t.identifier !== this.touchId) continue;
-            onMove(`touch-${t.identifier}`, t.clientX, t.clientY, e);
-            break;
-          }
-        },
-        { passive: false }
-      );
-      el.addEventListener(
-        "touchend",
-        (e) => {
-          if (!this.active || this.touchId === null) return;
-          for (const t of e.changedTouches) {
-            if (t.identifier !== this.touchId) continue;
-            onUp(`touch-${t.identifier}`, e);
-            break;
-          }
-        },
-        { passive: false }
-      );
-      el.addEventListener(
-        "touchcancel",
-        (e) => {
-          if (!this.active || this.touchId === null) return;
-          for (const t of e.changedTouches) {
-            if (t.identifier !== this.touchId) continue;
-            onUp(`touch-${t.identifier}`, e);
-            break;
-          }
-        },
-        { passive: false }
-      );
+      const onTrackedTouchMove = (e) => {
+        if (!this.active || this.touchId === null) return;
+        for (const t of e.changedTouches) {
+          if (t.identifier !== this.touchId) continue;
+          onMove(`touch-${t.identifier}`, t.clientX, t.clientY, e);
+          break;
+        }
+      };
+
+      const onTrackedTouchEnd = (e) => {
+        if (!this.active || this.touchId === null) return;
+        for (const t of e.changedTouches) {
+          if (t.identifier !== this.touchId) continue;
+          onUp(`touch-${t.identifier}`, e);
+          break;
+        }
+      };
+
+      // Use window-level listeners so dragging outside joystick bounds still moves/releases correctly.
+      window.addEventListener("touchmove", onTrackedTouchMove, { passive: false });
+      window.addEventListener("touchend", onTrackedTouchEnd, { passive: false });
+      window.addEventListener("touchcancel", onTrackedTouchEnd, { passive: false });
 
       el.addEventListener("contextmenu", (e) => e.preventDefault());
     }

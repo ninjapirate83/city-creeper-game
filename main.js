@@ -175,7 +175,7 @@
     return wrap;
   }
 
-  const BUILD_VERSION = "v11";
+  const BUILD_VERSION = "v12";
 
   const statusEl = makeStatus();
   const buildVersionEl = document.getElementById("buildVersion");
@@ -231,7 +231,7 @@
         this.active = true;
         this.pointerId = pointerId;
         this.center = getRectCenter();
-        if (pointerId !== null && el.setPointerCapture) {
+        if (typeof pointerId === "number" && el.setPointerCapture) {
           el.setPointerCapture(pointerId);
         }
         onMove(pointerId, clientX, clientY, e);

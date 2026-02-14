@@ -171,7 +171,11 @@
     return wrap;
   }
 
+  const BUILD_VERSION = "v9";
+
   const statusEl = makeStatus();
+  const buildVersionEl = document.getElementById("buildVersion");
+  if (buildVersionEl) buildVersionEl.textContent = `Build ${BUILD_VERSION}`;
   const breakBtn = makeButton("breakBtn", "Break", 16, 16 + 86 + 12);
   const jumpBtn = makeButton("jumpBtn", "Jump", 16, 16);
 
@@ -187,6 +191,7 @@
       this.knobEl = wrapEl.querySelector("div:last-child"); // knob
       this.active = false;
       this.pointerId = null;
+      this.touchId = null;
       this.center = { x: 0, y: 0 };
       this.value = { x: 0, y: 0 };
       this.radius = 58; // pixels from center
@@ -208,20 +213,22 @@
         this.knobEl.style.transform = `translate(${px}px, ${py}px)`;
       };
 
-      const onDown = (e) => {
-        e.preventDefault();
+      const onDown = (pointerId, clientX, clientY, e) => {
+        if (e) e.preventDefault();
         this.active = true;
-        this.pointerId = e.pointerId;
+        this.pointerId = pointerId;
         this.center = getRectCenter();
-        el.setPointerCapture(this.pointerId);
-        onMove(e);
+        if (pointerId !== null && el.setPointerCapture) {
+          el.setPointerCapture(pointerId);
+        }
+        onMove(pointerId, clientX, clientY, e);
       };
 
-      const onMove = (e) => {
-        if (!this.active || e.pointerId !== this.pointerId) return;
-        e.preventDefault();
-        const dx = e.clientX - this.center.x;
-        const dy = e.clientY - this.center.y;
+      const onMove = (pointerId, clientX, clientY, e) => {
+        if (!this.active || pointerId !== this.pointerId) return;
+        if (e) e.preventDefault();
+        const dx = clientX - this.center.x;
+        const dy = clientY - this.center.y;
         const len = Math.hypot(dx, dy);
         const max = this.radius;
         const cl = len > max ? max / len : 1;
@@ -234,20 +241,94 @@
         setKnob(nx, ny);
       };
 
-      const onUp = (e) => {
-        if (!this.active || e.pointerId !== this.pointerId) return;
-        e.preventDefault();
+      const onUp = (pointerId, e) => {
+        if (!this.active || pointerId !== this.pointerId) return;
+        if (e) e.preventDefault();
         this.active = false;
         this.pointerId = null;
+        this.touchId = null;
         this.value.x = 0;
         this.value.y = 0;
         this.knobEl.style.transform = `translate(0px, 0px)`;
       };
 
-      el.addEventListener("pointerdown", onDown, { passive: false });
-      el.addEventListener("pointermove", onMove, { passive: false });
-      el.addEventListener("pointerup", onUp, { passive: false });
-      el.addEventListener("pointercancel", onUp, { passive: false });
+      el.addEventListener(
+        "pointerdown",
+        (e) => {
+          onDown(e.pointerId, e.clientX, e.clientY, e);
+        },
+        { passive: false }
+      );
+      el.addEventListener(
+        "pointermove",
+        (e) => {
+          onMove(e.pointerId, e.clientX, e.clientY, e);
+        },
+        { passive: false }
+      );
+      el.addEventListener(
+        "pointerup",
+        (e) => {
+          onUp(e.pointerId, e);
+        },
+        { passive: false }
+      );
+      el.addEventListener(
+        "pointercancel",
+        (e) => {
+          onUp(e.pointerId, e);
+        },
+        { passive: false }
+      );
+
+      // Touch fallback for browsers where pointer events are inconsistent.
+      el.addEventListener(
+        "touchstart",
+        (e) => {
+          if (this.active || e.changedTouches.length === 0) return;
+          const t = e.changedTouches[0];
+          this.touchId = t.identifier;
+          onDown(`touch-${t.identifier}`, t.clientX, t.clientY, e);
+        },
+        { passive: false }
+      );
+      el.addEventListener(
+        "touchmove",
+        (e) => {
+          if (!this.active || this.touchId === null) return;
+          for (const t of e.changedTouches) {
+            if (t.identifier !== this.touchId) continue;
+            onMove(`touch-${t.identifier}`, t.clientX, t.clientY, e);
+            break;
+          }
+        },
+        { passive: false }
+      );
+      el.addEventListener(
+        "touchend",
+        (e) => {
+          if (!this.active || this.touchId === null) return;
+          for (const t of e.changedTouches) {
+            if (t.identifier !== this.touchId) continue;
+            onUp(`touch-${t.identifier}`, e);
+            break;
+          }
+        },
+        { passive: false }
+      );
+      el.addEventListener(
+        "touchcancel",
+        (e) => {
+          if (!this.active || this.touchId === null) return;
+          for (const t of e.changedTouches) {
+            if (t.identifier !== this.touchId) continue;
+            onUp(`touch-${t.identifier}`, e);
+            break;
+          }
+        },
+        { passive: false }
+      );
+
       el.addEventListener("contextmenu", (e) => e.preventDefault());
     }
   }

@@ -811,14 +811,63 @@
   /** ---------------------------
    *  Creeper-like enemy
    *  --------------------------- */
-  const creeper = BABYLON.MeshBuilder.CreateBox("creeper", { size: 1.0 }, scene);
+  // Invisible collider for movement/collisions + separate blocky visuals.
+  const creeper = BABYLON.MeshBuilder.CreateBox("creeper", { width: 0.85, height: 2.0, depth: 0.85 }, scene);
   creeper.position.set(8, 2, 8);
   creeper.checkCollisions = true;
   creeper.isPickable = false;
+  creeper.visibility = 0;
+
+  const creeperVisualRoot = new BABYLON.TransformNode("creeperVisualRoot", scene);
+  creeperVisualRoot.parent = creeper;
+
   const creeperMat = new BABYLON.StandardMaterial("creeperMat", scene);
   creeperMat.diffuseColor = new BABYLON.Color3(0.2, 0.75, 0.25);
   creeperMat.specularColor = new BABYLON.Color3(0.05, 0.05, 0.05);
-  creeper.material = creeperMat;
+
+  const creeperDarkMat = new BABYLON.StandardMaterial("creeperDarkMat", scene);
+  creeperDarkMat.diffuseColor = new BABYLON.Color3(0.06, 0.12, 0.06);
+  creeperDarkMat.specularColor = new BABYLON.Color3(0, 0, 0);
+
+  const torso = BABYLON.MeshBuilder.CreateBox("creeperTorso", { width: 0.78, height: 1.2, depth: 0.62 }, scene);
+  torso.parent = creeperVisualRoot;
+  torso.position.set(0, 0.2, 0);
+  torso.material = creeperMat;
+  torso.isPickable = false;
+
+  const head = BABYLON.MeshBuilder.CreateBox("creeperHead", { size: 0.82 }, scene);
+  head.parent = creeperVisualRoot;
+  head.position.set(0, 1.2, 0);
+  head.material = creeperMat;
+  head.isPickable = false;
+
+  const footL = BABYLON.MeshBuilder.CreateBox("creeperFootL", { width: 0.32, height: 0.75, depth: 0.32 }, scene);
+  footL.parent = creeperVisualRoot;
+  footL.position.set(-0.2, -0.75, 0);
+  footL.material = creeperMat;
+  footL.isPickable = false;
+
+  const footR = BABYLON.MeshBuilder.CreateBox("creeperFootR", { width: 0.32, height: 0.75, depth: 0.32 }, scene);
+  footR.parent = creeperVisualRoot;
+  footR.position.set(0.2, -0.75, 0);
+  footR.material = creeperMat;
+  footR.isPickable = false;
+
+  // Blocky frowny face on the front of the head.
+  const faceParts = [
+    [-0.16, 1.32, 0.43, 0.12, 0.12, 0.04],
+    [0.16, 1.32, 0.43, 0.12, 0.12, 0.04],
+    [0.0, 1.05, 0.43, 0.14, 0.16, 0.04],
+    [-0.1, 0.96, 0.43, 0.12, 0.08, 0.04],
+    [0.1, 0.96, 0.43, 0.12, 0.08, 0.04],
+  ];
+  for (const [x, y, z, w, h, d] of faceParts) {
+    const part = BABYLON.MeshBuilder.CreateBox("creeperFacePart", { width: w, height: h, depth: d }, scene);
+    part.parent = creeperVisualRoot;
+    part.position.set(x, y, z);
+    part.material = creeperDarkMat;
+    part.isPickable = false;
+  }
 
   const creeperState = {
     dir: new BABYLON.Vector3(1, 0, 0),
@@ -1051,6 +1100,9 @@
       }
       const step = creeperState.dir.scale(speedWander * dt);
       creeper.moveWithCollisions(step);
+      if (creeperState.dir.lengthSquared() > 1e-4) {
+        creeperVisualRoot.rotation.y = Math.atan2(creeperState.dir.x, creeperState.dir.z);
+      }
       creeperState.fuse = 0;
     } else {
       // chase
@@ -1060,13 +1112,14 @@
 
       const step = dir.scale(speedChase * dt);
       creeper.moveWithCollisions(step);
+      if (len > 1e-3) creeperVisualRoot.rotation.y = Math.atan2(dir.x, dir.z);
 
       // fuse/explosion
       if (dist < explodeRange) {
         creeperState.fuse += dt;
         // visual "about to explode" cue
         const pulse = 0.5 + 0.5 * Math.sin(creeperState.fuse * 18);
-        creeper.scaling.setAll(1 + pulse * 0.08);
+        creeperVisualRoot.scaling.setAll(1 + pulse * 0.08);
 
         if (creeperState.fuse >= 1.25) {
           // explode: remove voxels within radius
@@ -1074,12 +1127,12 @@
           explosionAt(boomPos, 4);
 
           // reset creeper
-          creeper.scaling.setAll(1);
+          creeperVisualRoot.scaling.setAll(1);
           respawnCreeper();
         }
       } else {
         creeperState.fuse = Math.max(0, creeperState.fuse - dt * 0.8);
-        creeper.scaling.setAll(1);
+        creeperVisualRoot.scaling.setAll(1);
       }
     }
 
